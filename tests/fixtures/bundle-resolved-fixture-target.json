@@ -1,0 +1,233 @@
+{
+  "bundle": {
+    "environment": "fixture",
+    "name": "cscie103-data-engineering",
+    "target": "fixture"
+  },
+  "include": [
+    "resources/assignment_01_job.yml",
+    "resources/assignment_02_job.yml",
+    "resources/unity_catalog.yml"
+  ],
+  "resources": {
+    "jobs": {
+      "assignment_01_ingest": {
+        "deployment": {
+          "kind": "BUNDLE",
+          "metadata_file_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/state/metadata.json"
+        },
+        "edit_mode": "UI_LOCKED",
+        "email_notifications": {
+          "on_failure": [
+            "fixture-user@example.invalid"
+          ]
+        },
+        "environments": [
+          {
+            "environment_key": "default",
+            "spec": {
+              "environment_version": "5"
+            }
+          }
+        ],
+        "format": "MULTI_TASK",
+        "max_concurrent_runs": 1,
+        "name": "assignment-01-spark-api",
+        "parameters": [
+          {
+            "default": "cscie103_catalog",
+            "name": "catalog"
+          },
+          {
+            "default": "assignment_01",
+            "name": "schema"
+          },
+          {
+            "default": "/Volumes/cscie103_catalog/assignment_01/raw",
+            "name": "volume"
+          }
+        ],
+        "queue": {
+          "enabled": true
+        },
+        "tasks": [
+          {
+            "environment_key": "default",
+            "notebook_task": {
+              "notebook_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/files/assignments/assignment-01/notebooks/assignment_01_spark_api"
+            },
+            "task_key": "ingest"
+          }
+        ]
+      },
+      "assignment_02_etl": {
+        "deployment": {
+          "kind": "BUNDLE",
+          "metadata_file_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/state/metadata.json"
+        },
+        "edit_mode": "UI_LOCKED",
+        "email_notifications": {
+          "on_failure": [
+            "fixture-user@example.invalid"
+          ]
+        },
+        "environments": [
+          {
+            "environment_key": "default",
+            "spec": {
+              "dependencies": [
+                "plotly==6.3.0"
+              ],
+              "environment_version": "5"
+            }
+          }
+        ],
+        "format": "MULTI_TASK",
+        "max_concurrent_runs": 1,
+        "name": "assignment-02-etl",
+        "parameters": [
+          {
+            "default": "cscie103_catalog",
+            "name": "catalog"
+          },
+          {
+            "default": "assignment_02",
+            "name": "schema"
+          }
+        ],
+        "queue": {
+          "enabled": true
+        },
+        "tasks": [
+          {
+            "environment_key": "default",
+            "notebook_task": {
+              "notebook_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/files/assignments/assignment-02/notebooks/assignment_02_etl"
+            },
+            "task_key": "etl"
+          }
+        ]
+      }
+    },
+    "schemas": {
+      "assignment_01": {
+        "catalog_name": "cscie103_catalog",
+        "comment": "Assignment 1 (Spark API). Fully managed by the cscie103-data-engineering bundle. Objects created here by hand are drift.",
+        "grants": [
+          {
+            "principal": "cscie103_readers",
+            "privileges": [
+              "USE_SCHEMA",
+              "SELECT"
+            ]
+          }
+        ],
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "assignment_01"
+      },
+      "assignment_02": {
+        "catalog_name": "cscie103_catalog",
+        "comment": "Assignment 2 (TPC-H ETL). Fully managed by the cscie103-data-engineering bundle. Objects created here by hand are drift.",
+        "grants": [
+          {
+            "principal": "cscie103_readers",
+            "privileges": [
+              "USE_SCHEMA",
+              "SELECT"
+            ]
+          }
+        ],
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "assignment_02"
+      }
+    },
+    "volumes": {
+      "assignment_01_audit": {
+        "catalog_name": "cscie103_catalog",
+        "comment": "Immutable-by-convention archive of executed job runs. Job run results are retained by Databricks for 60 days; anything needed beyond that must be materialised. Written by the archive task, never by hand.\nDOCUMENTED GAP, NOT A SOLVED PROBLEM: a SOC 2 audit vault wants S3 Object Lock in a bucket the organisation owns, with a retention policy and access logging. Free Edition has no external locations and no storage credentials, so this is a MANAGED volume on Databricks-owned storage -- durable and versioned, but not immutable and not customer-controlled. Upgrading means an external location plus a storage credential, at which point only the volume declaration changes.",
+        "grants": [
+          {
+            "principal": "cscie103_readers",
+            "privileges": [
+              "READ_VOLUME"
+            ]
+          }
+        ],
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "audit",
+        "schema_name": "${resources.schemas.assignment_01.name}",
+        "volume_path": "/Volumes/cscie103_catalog/assignment_01/audit",
+        "volume_type": "MANAGED"
+      },
+      "assignment_01_raw": {
+        "catalog_name": "cscie103_catalog",
+        "comment": "Landing zone for assignment source data: people10m, names-1880-2024, and databricks-blog.json.",
+        "grants": [
+          {
+            "principal": "cscie103_readers",
+            "privileges": [
+              "READ_VOLUME"
+            ]
+          }
+        ],
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "raw",
+        "schema_name": "${resources.schemas.assignment_01.name}",
+        "volume_path": "/Volumes/cscie103_catalog/assignment_01/raw",
+        "volume_type": "MANAGED"
+      }
+    }
+  },
+  "sync": {
+    "paths": [
+      "."
+    ]
+  },
+  "variables": {
+    "catalog": {
+      "default": "cscie103_catalog",
+      "description": "Unity Catalog catalog. NOT created by this bundle - prerequisite.",
+      "value": "cscie103_catalog"
+    },
+    "environment_version": {
+      "default": "5",
+      "description": "Databricks serverless environment version. AUTHORITATIVE: this value determines the Python interpreter the server runs, and contracts/environment-versions.json maps it to the local .python-version. check:env-parity fails the build when the two disagree.",
+      "value": "5"
+    },
+    "owner_email": {
+      "default": "fixture-user@example.invalid",
+      "description": "Where job failure notifications go. NOT the deployer: on_failure was the deploying user's address, which sends CI failures to the service principal -- an identity with no inbox. A notification nobody receives is worse than none, because it looks like coverage.\nNO DEFAULT, DELIBERATELY. An address here would be personal data committed to the repository, which the PII scanner correctly reports. Each target supplies its own: a placeholder for fixture capture, the real address via BUNDLE_VAR_owner_email when deploying.",
+      "value": "fixture-user@example.invalid"
+    },
+    "reader_principal": {
+      "default": "cscie103_readers",
+      "description": "Account group granted read access to this bundle's UC objects. Provisioned by `mise run bootstrap:identity`, NOT by this bundle -- groups are not a bundle resource type, so a bundle can only reference them.\nMUST BE AN ACCOUNT GROUP. `users` and `admins` are WORKSPACE-LOCAL, and workspace-local groups cannot hold privileges on UC securables at all. The API reports that attempt as PRINCIPAL_DOES_NOT_EXIST, which reads like a missing group but is a category error, and it is a documented common cause of UC access failures.\nNOT `account users` either: that exists and would work, but it means every account user. UC best practice is least privilege via purpose-named groups.\nNOT a user identity: owners already hold all privileges, so a self-grant is redundant, and UC best practice is to avoid direct grants to users.",
+      "value": "cscie103_readers"
+    },
+    "schema": {
+      "default": "assignment_01",
+      "description": "Bare schema name. The RESOURCE keeps this plain value. Never interpolate schema_prefix into resources.schemas.*.name -- the CLI adds its own prefix on top and you get dev_user_dev_user_<schema>.",
+      "value": "assignment_01"
+    },
+    "schema_prefix": {
+      "default": "",
+      "description": "What the CLI prepends in this target. Consumers -- job parameters, notebook widgets -- build the effective name as assignment_01 so nothing hardcodes a name that development mode is going to rewrite.",
+      "value": ""
+    }
+  },
+  "workspace": {
+    "artifact_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/artifacts",
+    "file_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/files",
+    "resource_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/resources",
+    "root_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering",
+    "state_path": "/Workspace/.bundle-fixture-never-deployed/cscie103-data-engineering/state"
+  }
+}

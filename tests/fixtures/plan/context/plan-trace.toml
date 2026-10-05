@@ -1,0 +1,10 @@
+# tests/fixtures/plan/context/plan-trace.toml
+# The fixture plan's trace (D.53): every item mapped from the fixture's own source.
+contract = "plan-trace/v1"
+sources = [
+  { id = "SESSION", title = "the fixture plan", locator = "tests/fixtures/plan" },
+]
+candidates = [
+  { source = "SESSION", ref = "steps", text = "fixture steps", maps_to = ["D.12", "D.22", "D.32"] },
+  { source = "SESSION", ref = "decisions", text = "fixture decisions", maps_to = ["X.1", "X.3"] },
+]

@@ -1,0 +1,195 @@
+[project]
+name = "cscie103-data-engineering"
+version = "0.1.0"
+description = "CSCI E-103 coursework: assignments, case studies, final project"
+# MUST MATCH .python-version AND THE BUNDLE'S environment_version.
+# check:env-parity enforces the .python-version <-> environment_version link;
+# this pin is what uv resolves against. Spark Connect requires client and server
+# to share the same Python minor version.
+requires-python = "==3.12.3"
+dependencies = [
+    "tomlkit>=0.15.1",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.14",
+  "pytest>=8.3",
+  "ruff>=0.9",
+  # AMBIENT PROCESS STATE, MADE A VALIDATED SNAPSHOT.
+  #
+  # Every script here depends on environment variables that nothing declares.
+  # DATABRICKS_HOST and the M2M credentials decide which workspace a command
+  # reaches. GIT_DIR silently redirects git calls made from a hook.
+  # BUNDLE_VAR_owner_email decides whether a deploy runs at all. None of that was
+  # written down; it was read from os.environ where it happened to be needed,
+  # differently in each file.
+  #
+  # That is what cost four CI runs: a bundle resolved differently on a runner
+  # than on a laptop, and nothing in the code said which variables governed the
+  # difference. A schema makes the boundary explicit and the snapshot inspectable.
+  #
+  # SecretStr matters beyond tidiness: it renders as ********** when printed.
+  # This project rendered a live OAuth secret to a terminal once, and a type that
+  # cannot print itself is a stronger guarantee than remembering not to.
+  "pydantic-settings>=2.6",
+  # PII DETECTION BY CONTENT, NOT BY PATH.
+  #
+  # The structural controls -- .gitignore rules and a path/extension test -- are
+  # proxies. They catch the realistic mistake (committing an export) and miss a
+  # data file placed anywhere unexpected. This reads what is in the file.
+  #
+  # The gap is not hypothetical: .gitignore excludes *.parquet and *.csv, while
+  # an HTML export of an executed notebook carries the same names, birth dates
+  # and salaries in its cell outputs and matches no rule at all.
+  #
+  # THE PROJECT MOVED: it lives under data-privacy-stack/presidio now, not
+  # microsoft/presidio. Same package name on PyPI.
+  #
+  # NOT presidio-cli, the obvious choice: it supports Python 3.8-3.10 and this
+  # project is pinned to 3.12.3.
+  "presidio-analyzer>=2.2.364",
+  # en_core_web_sm, NOT the documented en_core_web_lg. The large model is ~560MB
+  # against ~12MB, and this scans a repo that should contain no PII at all --
+  # recall on obvious entities is the requirement, not subtle disambiguation.
+  #
+  # Pinned by URL rather than fetched with `spacy download`, so uv locks it like
+  # any other dependency. A download at install time is a network call no
+  # lockfile records -- the reproducibility hole mise.lock and uv.lock close.
+  "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+  "copier>=9.17",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+# FIRST-PARTY CODE IS FOUND BY LOCATION, NOT BY AN ENUMERATION OF NAMES.
+#
+# This was known-first-party = [...] under [tool.ruff.lint.isort], and it went
+# stale three times in one sitting -- once per module added. A list of names is
+# a second copy of something the directory already knows, and the failure is
+# silent: imports sort as third-party until lint eventually says so.
+#
+# `src` is what ruff's maintainers point people to for exactly this: it declares
+# where first-party code LIVES, so a new module is first-party because of where
+# it is rather than because someone remembered to update a list.
+#
+# It belongs under [tool.ruff], not [tool.ruff.lint.isort] -- the isort table
+# holds isort's own settings, and putting src there would be silently ignored.
+src = ["scripts", "."]
+
+[tool.ruff.lint]
+# Deliberately broader than defaults. S is bandit: a sibling project's audit
+# found this exact gap -- data policed rigorously, executed CODE never checked.
+select = ["E", "F", "I", "N", "UP", "B", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# S603/S607 are subprocess warnings. These scripts invoke the CLI deliberately,
+# with fixed argument lists and no user input, so the finding is noise here --
+# ignored NARROWLY by path so a genuinely unsafe call elsewhere still reports.
+"scripts/*.py" = ["S603", "S607"]
+# S101 forbids `assert` because Python strips asserts under -O, so an assert used
+# as a runtime security check silently disappears. That does not apply in a test
+# file: asserts ARE the mechanism and pytest never runs optimized. S603/S607 for
+# the same reason as scripts/ -- and proving a scanner detects a planted
+# credential cannot be faked in-process; it has to shell out.
+"tests/*.py" = ["S101", "S603", "S607"]
+# DATABRICKS NOTEBOOKS ARE A DIFFERENT LANGUAGE DIALECT, SCOPED BY PATH.
+#
+#   F821  spark, dbutils and display are INJECTED BY THE RUNTIME. They have no
+#         import and cannot have one.
+#   E402  a notebook is cells, not a module. Imports belong in the cell that
+#         introduces them.
+#   N812  `from pyspark.sql import functions as F` is the universal PySpark
+#         convention; renaming it would make the code unrecognisable.
+#   N816  top10FemaleFirstNamesDF is the name the ASSIGNMENT specifies.
+#   S101  asserts are the checking mechanism, and a job never runs under -O.
+#
+# Everything else still applies -- unused imports, undefined locals, real bugs.
+"assignments/**/notebooks/*.py" = ["F821", "E402", "N812", "N816", "S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# THE FILE SET, DECLARED ONCE. mypy checks these only when no path is given on
+# the command line, so policies/typing refuses any invocation naming one.
+files = ["scripts", "tests"]
+# Notebooks are excluded for the same reason F821 is disabled for them: spark,
+# dbutils and display have no importable types, so every cell would report errors
+# describing the checker's model rather than the code.
+exclude = ["assignments/.*/notebooks/.*"]
+
+# --- Fail closed ---------------------------------------------------------------
+# strict = true is not the ceiling. These turn silence into failure.
+#
+# warn_unused_configs   a section matching no file is a config that stopped
+#                       applying when something moved. It has happened here:
+#                       scripts/git/ was flattened and paths went stale.
+# warn_unreachable      unreachable code is either dead or a wrong type guard.
+#                       Both are findings; neither should be quiet.
+# ignore-without-code   a bare `# type: ignore` suppresses EVERY error on that
+#                       line, including ones added later. Requiring the code
+#                       keeps a suppression narrow to what was actually reviewed.
+# possibly-undefined    a name assigned only inside a branch, read outside it.
+# redundant-expr        a condition that is always true or always false, which
+#                       is how a rule ends up dead -- this repo shipped exactly
+#                       that in Rego and it passed 21 tests.
+warn_unused_configs = true
+warn_unreachable = true
+enable_error_code = [
+  "ignore-without-code",
+  "possibly-undefined",
+  "redundant-expr",
+  "truthy-bool",
+]
+
+# presidio_analyzer, spacy and their transitive imports ship no type stubs.
+# Without this, strict mode reports an error per import for libraries whose
+# types are not this project's concern -- and a blanket ignore_errors would hide
+# real problems in our own code.
+[[tool.mypy.overrides]]
+module = ["presidio_analyzer.*", "spacy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# MARKERS ARE REGISTERED, AND UNREGISTERED ONES ARE AN ERROR.
+markers = [
+  "integration: requires network and Databricks credentials; excluded from the default run",
+]
+
+# --- Fail closed ---------------------------------------------------------------
+# --strict-markers   a typo'd marker is an ERROR, not a silently-created new one.
+#                    Without it @pytest.mark.integraton runs in the default suite
+#                    forever -- the silent-pass shape this repo keeps finding.
+# --strict-config    an unknown ini key is an error rather than ignored. A
+#                    misspelled option that does nothing looks exactly like one
+#                    that works.
+# -ra                report the reason for every non-passing outcome. A skip
+#                    nobody sees is a test that stopped running.
+# -m not integration the default run is HERMETIC: `test` sits in check:offline
+#                    behind the pre-push hook, and a hook needing credentials is
+#                    a hook people bypass. CI runs the integration gate.
+addopts = ["--strict-markers", "--strict-config", "-ra", "-m", "not integration"]
+
+# An xfail that PASSES is a failure. Otherwise a fixed bug leaves its xfail in
+# place forever and the suite reports success for a test asserting nothing.
+xfail_strict = true
+
+# scripts/ IS IMPORTABLE BY TESTS, DECLARED RATHER THAN HACKED.
+#
+# Tests import the SAME redaction, scrubbing and git-environment code the scripts
+# use, so a test asserting "the fixture is identity independent" exercises the
+# real implementation. Reimplementing it in the test would let the two drift and
+# the test would verify itself rather than the thing it guards.
+#
+# `sys.path.insert(...)` in a test body was the first version. pythonpath is the
+# pytest option for exactly this, and puts the arrangement in configuration where
+# it is visible rather than in one function where it is not.
+#
+# KNOWN DEBT: shared helper code belongs in an installed src/ package. The 2026
+# guidance is explicit -- prefer the src layout, deprecate PYTHONPATH hacks. That
+# migration is a change of its own.
+pythonpath = ["scripts"]

@@ -1,0 +1,225 @@
+name: CI
+
+# WHY push AND pull_request, WHICH LOOKS REDUNDANT
+# pull_request checks the MERGE RESULT -- your branch merged into the base --
+# which is what actually ships. push checks the branch as written. They can
+# disagree when the base moves under you, and only the merge result matters for
+# the merge decision.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# LEAST PRIVILEGE AT THE WORKFLOW LEVEL. The default token is far broader than a
+# gate needs. This workflow reads code and nothing else; it publishes nothing,
+# comments on nothing, and writes no packages.
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede in-flight runs on the same ref. A superseded run is checking code
+  # nobody will merge.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # NAMED because this string is what GitHub shows when selecting required
+    # status checks for branch protection. An unnamed job appears as a bare key,
+    # which is a poor thing to pick from a list when the choice gates merges.
+    name: quality gate
+    runs-on: ubuntu-latest
+    env:
+      # NO `uv run` MAY INSTALL ANYTHING. Every dependency arrives through the
+      # explicit install step below, so a missing or misplaced install fails
+      # loudly at the first Python call instead of one step working by accident.
+      UV_NO_SYNC: "1"
+    steps:
+      # PINNED TO A COMMIT SHA, NOT A TAG. A tag is mutable -- the owner can
+      # repoint v5 at any commit, so the workflow would run whatever code sits
+      # behind that tag today. That is the same "records history instead of
+      # constraining the future" problem that produced the literal tool pins in
+      # mise.toml, and it matters more here: a compromised action runs on the
+      # runner with access to this job's Databricks client secret.
+      #
+      # The comment carries the version so the pin stays readable; the SHA is
+      # what actually executes. Update deliberately via `zizmor --fix` or by
+      # re-resolving the tag, never by editing the comment.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # FULL HISTORY IS REQUIRED, NOT A PREFERENCE. The default is a shallow
+          # clone of depth 1, and the secret scan walks every commit. Against a
+          # shallow clone it would report clean while checking almost nothing --
+          # a gate that manufactures confidence, which is worse than no gate.
+          fetch-depth: 0
+          # actions/checkout persists GITHUB_TOKEN into .git/config by default,
+          # where any later step can read it and any artifact can carry it off
+          # the runner. Nothing here pushes or tags, so the credential has no
+          # legitimate use after checkout.
+          persist-credentials: false
+
+      # A STALE LOCK IS THE STALENESS RISK THAT REMAINS.
+      #
+      # The flake was first pinned to nixos-26.05, a frozen release branch, and
+      # its packages were four months behind by design -- uv 0.11.21 against a
+      # pinned 0.12.5, and a databricks CLI from a superseded major line.
+      # Switching to nixpkgs-unstable closed that gap, but flake.lock now pins
+      # one revision and will hold it forever unless someone updates it. The
+      # staleness moved from the branch to the lock.
+      #
+      # fail-mode IS NOT OPTIONAL HERE. This action "always exits with a status
+      # code of 0 by default -- and thus never fails your workflows", reporting
+      # findings as a Markdown summary instead. A summary nobody reads is not a
+      # gate, and this repository has removed several checks that reported
+      # rather than enforced.
+      #
+      # NOT A SCHEDULED update-flake-lock WORKFLOW. That is the obvious
+      # alternative and it carries a failure this repo already documented for
+      # check:ruleset: GitHub disables scheduled workflows after 60 days
+      # without repository activity, and a successful scheduled run does not
+      # itself count as activity. A refresh that silently stops leaves a lock
+      # rotting while looking maintained. Tying the check to every PR means it
+      # cannot stop without someone noticing.
+      #
+      # 30 DAYS is a month of drift on a dev toolchain -- long enough not to
+      # nag, short enough that the four-month gap that prompted this cannot
+      # recur.
+      - uses: DeterminateSystems/flake-checker-action@fca8ac4a1791a59f5599f06b8dcf4c5bd7c8d53f
+        with:
+          fail-mode: true
+          check-outdated: false
+          condition: "numDaysOld < 30"
+
+      # NIX ON THE RUNNER, WHICH REMOVES A WHOLE CLASS OF WORKAROUND.
+      #
+      # Every "the runner has no Nix" accommodation in this repository exists
+      # because of its absence: the contract gate confined to git hooks, the
+      # flake never verified where it matters, and two CI failures spent
+      # learning that a test asserting the author's laptop is not a test.
+      #
+      # THE TAGGED ACTION, NOT nix-installer-action@main. That one "uses the
+      # most recent version of Determinate Nix even when the Action itself is
+      # pinned" -- so a SHA pin would describe the wrapper while the Nix
+      # underneath moved. determinate-nix-action@v3.22.3 pins the Nix VERSION,
+      # and 3.22.3 is what this project's own machine runs, so CI and laptop
+      # execute the same binary.
+      #
+      # NO magic-nix-cache-action. Its cache now authenticates against
+      # api.flakehub.com and "FlakeHub's hosted cache no longer has a useful
+      # free tier"; projects hitting that removed it rather than debug auth
+      # failures in CI. Installer only.
+      - uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614 # v3.22.3
+
+      # mise IS STILL NEEDED, BUT IT NO LONGER INSTALLS TOOLS.
+      #
+      # `experimental: true` was here to fail on a stale mise.lock. That file is
+      # deleted with the [tools] block, so the setting guarded nothing -- and a
+      # setting that enforces nothing is a claim of coverage this repository
+      # does not make.
+      #
+      # THE ACTION STAYS because `mise run check` is the gate and something must
+      # provide mise. Tools reach the tasks through task_config, which enters
+      # the Nix devShell.
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+
+      # DEPENDENCIES ARE INSTALLED HERE, EXPLICITLY, BEFORE ANY STEP RUNS THIS
+      # REPOSITORY'S PYTHON.
+      #
+      # They used to arrive as a side effect: the first gate whose `uv run`
+      # happened to sync built the environment midway through `check`. verify
+      # branch protection runs before that, so it got an empty environment -- and
+      # worked only while check_ruleset.py imported nothing but the standard
+      # library. Validating its input with pydantic is what exposed it.
+      #
+      # --locked, NOT --frozen. --frozen installs uv.lock without checking that it
+      # still resolves, so a stale lock surfaces later, blamed on some unrelated
+      # gate; --locked fails HERE, naming the lock.
+      #
+      # THROUGH A mise TASK, so installation and every gate after it share one
+      # environment and one uv cache.
+      - name: install dependencies
+        run: mise run deps:install
+
+      # RUNS AS ITS OWN STEP, NOT AS PART OF `check`.
+      #
+      # It needs network and gh auth, and a local commit cannot weaken a
+      # server-side ruleset -- so coupling every commit to both would block
+      # offline work for no benefit.
+      #
+      # NOT a scheduled workflow either, which was the obvious design and is
+      # wrong: GitHub disables scheduled workflows after 60 days without
+      # repository activity, and a successful scheduled run does not itself count
+      # as activity. A security check that silently stops is worse than none,
+      # because it manufactures confidence. Tying it to CI removes the cron
+      # dependency entirely.
+      #
+      # Verifies the ruleset's CONTENTS, not its existence: one edited to require
+      # nothing is the failure mode that looks like success.
+      - name: verify branch protection
+        run: mise run check:ruleset
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # ONE COMMAND. ci.yml deliberately restates NOTHING about what is checked.
+      #
+      # An earlier design would have listed lint, types, test and the rest as
+      # separate steps -- a second copy of that list, which drifts the moment a
+      # gate is added to mise.toml and forgotten here. Adding a gate to
+      # `check` now extends local runs, the git hooks, and this workflow at once.
+      #
+      # CI IS DELIBERATELY BROADER THAN THE HOOKS, NOT A MIRROR OF THEM.
+      # pre-commit runs format and lint; pre-push runs check:offline. Only here
+      # do check:prereqs and check:env-parity run, because they need a live
+      # workspace -- and only here is a --no-verify bypass caught, which requires
+      # that CI check strictly more than the hooks it backstops.
+      - name: mise run check
+        run: mise run check
+        env:
+          DATABRICKS_HOST: https://dbc-c7e8aa56-e393.cloud.databricks.com
+          # NOT A SECRET. The OAuth client ID identifies the service principal
+          # the way a username does. Only the secret is sensitive.
+          DATABRICKS_CLIENT_ID: 223db154-8528-4bdb-b579-866010b8fc1c
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          # EXPLICIT AUTH TYPE, BECAUSE THE BUNDLE FORCES A PROFILE LOOKUP.
+          #
+          # databricks.yml sets a `host` mapping, and setting host INSTRUCTS the
+          # CLI to find a matching profile in .databrickscfg and use that
+          # profile's fields to decide the auth type. That resolution happens at
+          # the bundle level, so no CLI flag affects it -- which is why removing
+          # a hardcoded -p from the scripts changed nothing at all.
+          #
+          # On a runner there is no .databrickscfg, so that lookup fails with
+          # "cannot parse config file". Naming the auth type explicitly stops the
+          # CLI resolving through a profile and makes it use the M2M credentials
+          # already present in the environment.
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+
+      # DIAGNOSTIC, NOT DECORATION. Two CI runs were spent inferring which
+      # credentials the CLI was using. This reports the resolved auth type and
+      # its source, so the next failure names itself.
+      #
+      # RUNS ONLY WHEN SOMETHING ABOVE FAILED.
+      #
+      # This diagnostic ended a four-attempt debugging loop: two CI failures were
+      # diagnosed by reading an error message and guessing, and this step is what
+      # finally showed that authentication was already fine and `bundle validate`
+      # was failing for an unrelated reason -- it takes a different auth path when
+      # the bundle pins a host.
+      #
+      # It was originally an always-on step, which spent an API call on every
+      # green run for information nobody reads when things work. `if: failure()`
+      # makes it free on success and automatic on failure.
+      #
+      # NOTE FOR ANYONE ADDING continue-on-error LATER: `if: failure()` reads a
+      # step's CONCLUSION, and continue-on-error forces conclusion to success
+      # regardless of outcome. Combining them silently disables this condition.
+      # Use `steps.<id>.outcome == 'failure'` if that ever becomes necessary.
+      - name: diagnose auth on failure
+        if: failure()
+        run: mise run auth:describe || true
+        env:
+          DATABRICKS_HOST: https://dbc-c7e8aa56-e393.cloud.databricks.com
+          DATABRICKS_CLIENT_ID: 223db154-8528-4bdb-b579-866010b8fc1c
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m

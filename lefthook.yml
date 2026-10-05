@@ -1,0 +1,63 @@
+# lefthook.yml
+# Git hooks, committed so they belong to the repo rather than to one laptop.
+#
+# NO VERSIONS OR BINARY PATHS APPEAR HERE. Everything runs through `mise run`,
+# so versions live in flake.lock and uv.lock -- mise.lock went with the Nix
+# cutover -- and this config cannot drift from the toolchain.
+# It is also the rule this repo earned the hard way: pinned tools are invoked via
+# mise, never by bare command name, because a bare name resolves against whatever
+# PATH the shell happens to have at that moment.
+#
+# THE STAGING, AND WHY IT IS NOT "RUN EVERYTHING EVERYWHERE"
+#   pre-commit  fast and offline: format, lint. Seconds.
+#   pre-push    medium: types and tests, still offline.
+#   CI          the full gate, including the network checks.
+#
+# The hook nobody runs is worse than the slower hook that still catches things.
+# A pre-commit needing Databricks auth fails on a plane, and a hook that fails on
+# a plane is a hook people bypass with --no-verify -- at which point it catches
+# nothing at all. A local commit cannot invalidate server-side state, so there is
+# nothing lost by deferring those checks.
+#
+# CI IS DELIBERATELY BROADER THAN THESE HOOKS, NOT A MIRROR OF THEM. A pre-commit
+# hook only ever sees the incoming change, and --no-verify skips it entirely. CI
+# is the layer where a bypass is caught, which only works if it checks more.
+#
+# SYNTAX: `jobs:`, not `commands:`. `commands:` is lefthook 1.x; this repo's
+# lefthook comes from the flake and is 2.x. The exact version is not restated
+# here: a number copied into prose is the one that drifted.
+
+pre-commit:
+  # NOT parallel. The formatter REWRITES files, so it must finish before any
+  # check reads them. Running both at once is a race whose outcome depends on
+  # which process wins.
+  parallel: false
+  jobs:
+    # BRANCH GUARD FIRST, BEFORE ANY WORK. The server ruleset already rejects a
+    # PUSH to develop or main, but by then the commit exists and has to be
+    # unwound. Catching it here keeps recovery to a single `git switch -c`.
+    #
+    # Fails closed, which is what an unattended run needs: it will not notice a
+    # warning, but it will notice a non-zero exit.
+    - name: branch
+      run: mise run start:check
+
+    - name: format
+      run: mise run fmt
+      # Re-stages what the formatter rewrote, so a commit cannot omit its own
+      # formatting fix.
+      stage_fixed: true
+    - name: lint
+      run: mise run lint
+
+commit-msg:
+  jobs:
+    # EVERY COMMIT NAMES THE PLAN STEPS IT SERVES, refused here at zero latency.
+    # --no-verify skips this; the gate, which CI runs, does not.
+    - name: plan steps
+      run: mise run plan:trailers {1}
+
+pre-push:
+  jobs:
+    - name: gate (offline)
+      run: mise run check:offline

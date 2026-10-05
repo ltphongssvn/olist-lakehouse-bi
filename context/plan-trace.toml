@@ -1,0 +1,11 @@
+# context/plan-trace.toml
+# Where every plan item came from (plan-trace/v1), traced in both directions.
+contract = "plan-trace/v1"
+candidates = [
+  { source = "TEMPLATE", ref = "day one", text = "its own plan, from day one", maps_to = ["A.1"] },
+]
+
+[[sources]]
+id = "TEMPLATE"
+title = "the platform template this project was generated from"
+locator = ".copier-answers.yml"

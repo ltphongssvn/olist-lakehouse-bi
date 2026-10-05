@@ -1,0 +1,42 @@
+# contracts/project-identity.toml
+# Project identity, declared once (D.52).
+#
+# Code reads these values through scripts/project_identity.py and derives every relation
+# from them. Files that cannot read this file hold the SLOTS below, and identity:set
+# rewrites exactly those lines, so a generated project takes its own identity in one
+# recorded operation -- and policies/identity refuses any copy that lives anywhere else.
+contract = "project-identity/v1"
+name = "cscie103-data-engineering"
+catalog = "cscie103_catalog"
+reader_group = "cscie103_readers"
+ci_principal = "cscie103-ci"
+default_schema = "assignment_01"
+repository = "https://github.com/ltphongssvn/cscie103-data-engineering"
+
+# Paths whose identity is derived, quoted verbatim, or coursework rather than declared.
+exempt = [
+  "contracts/project-identity.toml",
+  "uv.lock",
+  "tests/",
+  "context/",
+  "assignments/",
+  "resources/assignment_",
+  "resources/unity_catalog.yml",
+  # coursework: loads the assignment volumes resources/unity_catalog.yml declares
+  "scripts/load_assignment_data.py",
+  # derived provenance: _src_path names the template a project was generated from (D.61)
+  ".copier-answers.yml",
+]
+
+# Lines that cannot read this file. Each renders exactly as the file holds it.
+slots = [
+  { path = "pyproject.toml", line = 'name = "{name}"' },
+  { path = "databricks.yml", line = "  name: {name}" },
+  { path = "databricks.yml", line = "    default: {catalog}" },
+  { path = "databricks.yml", line = "    default: {reader_group}" },
+  { path = "databricks.yml", line = "    default: {default_schema}" },
+  { path = "flake.nix", line = '  description = "{name} toolchain";' },
+  { path = "contracts/environment-versions.json", line = '  "$id": "{repository}/contracts/environment-versions.json",' },
+  { path = "mise.toml", line = "    if r.get('displayName') == '{ci_principal}':" },
+  { path = "mise.toml", line = '''  echo "{ci_principal} not found; run 'mise run bootstrap:identity' first" >&2''' },
+]

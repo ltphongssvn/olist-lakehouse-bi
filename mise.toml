@@ -1,0 +1,938 @@
+# mise.toml
+# TASKS. The toolchain lives in flake.nix; this file does not own tools.
+#
+# WHERE THE PYTHON VERSION LIVES, AND WHY NOT HERE:
+#   The authoritative declaration is `environment_version` in the bundle
+#   (databricks.yml / resources/*.yml). That value is what deploys and what the
+#   server runs. Restating the interpreter here would create a second
+#   hand-maintained copy of one fact, and two copies drift. Drift surfaces as
+#   "Python versions in the Spark Connect client and server are different",
+#   discovered when a UDF dies rather than when the change was made.
+#
+#   So: .python-version holds the local interpreter, the bundle holds the target,
+#   contracts/environment-versions.json maps between them, and
+#   `mise run check:env-parity` fails the build when they disagree.
+#   A gate, not a comment.
+#
+# KNOWN SEAM: that mapping file is transcribed from published docs, because
+# Databricks exposes environment version contents as a reference table, not an
+# API. It is the one link a human maintains. Named here rather than hidden.
+#   https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/
+
+# --- WHY THERE IS NO [tools] BLOCK --------------------------------------------
+#
+# This file pinned nine tools and flake.nix declared the same nine: two
+# declarations of one fact, which is the drift this repository exists to remove,
+# reproduced at its centre. scripts/check_toolchain_parity.py bridged that gap
+# and is retired with the block.
+#
+# WHAT NIXPKGS SHIPS, MEASURED RATHER THAN ASSUMED:
+#   uv 0.12.5, opa 1.19.1, regal 0.42.0, databricks 1.14.0, osv-scanner 2.5.1,
+#   betterleaks 1.8.1 -- every one an exact match for what was pinned here.
+#   zizmor 1.30.0 and lefthook 2.1.12 are NEWER. java is Temurin 17.0.19+10:
+#   the vendor this file insisted on, one patch behind.
+#
+# THAT MATCH ONLY EXISTS ON nixpkgs-unstable. The flake was first pinned to
+# nixos-26.05, a frozen release branch whose packages were four months stale by
+# design -- uv 0.11.21, regal 0.40, databricks 0.290.2, a superseded major line
+# of the CLI. The branch was the problem, not Nix. flake.lock provides the
+# reproducibility a release branch was chosen for.
+#
+# THERE IS ALSO NO [settings] BLOCK ANY MORE. It carried `lockfile = true` and
+# `install_before = "7d"`, both of which govern mise's TOOL INSTALLATION. With
+# no tools to install they enforce nothing, and a setting that enforces nothing
+# is a claim of coverage this repository does not make. flake.lock is now the
+# lockfile, and mise.lock is deleted rather than left as an artifact describing
+# a toolchain that no longer comes from here.
+
+# NO [env] BLOCK SETTING DATABRICKS_HOST, AND THAT ABSENCE IS DELIBERATE.
+#
+# It was set here briefly and broke local authentication. The CLI resolves
+# credentials in order -- environment variables, then the .databrickscfg DEFAULT
+# profile -- and stops at the first success. A bare DATABRICKS_HOST looks like
+# progress: it names a workspace without supplying any way to prove identity, so
+# resolution halts and never reaches the profile that holds the OAuth session.
+# The result is "cannot configure default credentials ... Env: DATABRICKS_HOST".
+#
+# So the host comes from the DEFAULT profile locally and from ci.yml on the
+# runner, where it accompanies real credentials. Same rule as everywhere else in
+# this repo: the environment supplies a COMPLETE answer or none at all.
+
+# --- Task interpreter ---------------------------------------------------------
+[task_config]
+# EVERY TASK RUNS INSIDE THE NIX DEVSHELL. This line is what makes the toolchain
+# cutover work, and without it nothing here runs at all.
+#
+# Removing [tools] left `uv`, `opa` and the rest unresolvable: `mise run lint`
+# died with "No version is set for shim: uv". The tools existed -- in the flake
+# -- but nothing put them on PATH for a task body.
+#
+# THE ALTERNATIVE WAS `nix develop --command` AT EVERY CALL SITE: forty task
+# bodies, four lefthook jobs and a CI workflow, each depending on someone
+# remembering. One forgotten call site is a task that works for whoever happens
+# to be inside a shell already and fails for everyone else -- the ambient-state
+# dependency this repository exists to remove. One boundary, declared once.
+#
+# THE SHELL IS STILL PINNED, which was this setting's original purpose. mise
+# defaults to `sh`, and `sh` is bash-in-POSIX-mode on macOS and dash on the
+# Ubuntu runner: same task body, different interpreter, green locally and dead
+# in CI. `bash -c` inside `nix develop` keeps that pin and adds the toolchain.
+#
+# BASH DOES NOT SET errexit, WHICH IS WHY EVERY MULTI-COMMAND TASK BELOW OPENS
+# WITH `set -euo pipefail`. mise's own default includes `-o errexit -o
+# pipefail`; overriding the shell discards that. A multi-command task without it
+# reports the exit code of its LAST command, so an earlier failure passes
+# silently -- `nix:policy` shipped exactly that bug, running four checks where
+# only the fourth could fail the task.
+shell = "nix develop --command bash -c"
+
+# --- Nix ----------------------------------------------------------------------
+
+[tasks."nix:contract"]
+description = "Verify this machine's Nix installation against the contract"
+run = "uv run --no-sync python scripts/nix_contract.py"
+
+[tasks."nix:bootstrap"]
+description = "Install Nix, idempotently, with the Determinate installer"
+# THE ONLY TASK THAT CANNOT RUN IN THE DEVSHELL, because it is what makes the
+# devshell possible. `shell` above would need nix to already exist.
+#
+# NOT A CHICKEN-AND-EGG PROBLEM IN PRACTICE: a machine without nix cannot run
+# any task here, and this one prints what to do rather than pretending. Run it
+# directly if mise cannot start:
+#   bash scripts/... is not needed; the body below is the whole procedure.
+run = '''
+set -euo pipefail
+if command -v nix > /dev/null 2>&1; then
+  echo "nix is already installed: $(nix --version)"
+  exit 0
+fi
+
+echo "Installing Determinate Nix. This creates an APFS volume at /nix, a"
+echo "launchd daemon, build users, and edits /etc/zshrc and /etc/fstab."
+echo "It writes /nix/receipt.json so it can be cleanly uninstalled."
+curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+'''
+
+[tasks."nix:shell"]
+description = "Enter the Nix devShell interactively"
+# THE TOOLCHAIN, FOR A HUMAN. Tasks enter this shell automatically via
+# task_config; this is for working in it directly -- running a tool ad hoc,
+# checking a version, debugging a build.
+run = "nix develop"
+
+[tasks."nix:flake-check"]
+description = "Evaluate the flake on every supported platform"
+# --all-systems IS THE POINT. Without it only the current platform is checked,
+# and a package present on Darwin but not Linux passes locally and breaks on the
+# runner -- the machine-dependence this project keeps removing.
+#
+# --no-build evaluates derivations without realising them: seconds rather than a
+# toolchain download. IT PROVES NAMES RESOLVE, NOT THAT THEY BUILD. An unfree
+# licence on databricks-cli passed four green platforms here and failed on the
+# first real `nix develop`, because licences are checked at realisation.
+run = "nix flake check --no-build --all-systems"
+
+[tasks."nix:policy"]
+description = "Format, check, lint and unit-test the machine policy"
+# `set -euo pipefail` ADDED, AND ITS ABSENCE WAS A REAL FAIL-OPEN BUG.
+#
+# This ran four commands under `bash -c`, which does not set errexit. A failing
+# `opa fmt` or `opa check` did not stop the task, and the exit code came from
+# `opa test` alone -- so three of four checks could fail while the task reported
+# success. The same shape as a gate whose result is never printed.
+run = '''
+set -euo pipefail
+opa fmt --fail --diff policies/machine/nix
+opa check --strict policies/machine/nix
+regal lint policies/machine/nix
+opa test policies/machine/nix --fail-on-empty
+'''
+
+# --- Prerequisites ------------------------------------------------------------
+# Things the bundle DEPENDS ON but cannot own. The industry split is settled:
+# Terraform owns platform infrastructure and identity, bundles own the deployable
+# workload. Groups are identity, so they belong in the Terraform layer -- and
+# would live there on a paid tier. Free Edition blocks the account host Terraform
+# needs, which puts this in the third layer of the standard pattern: imperative
+# automation for gaps declarative configuration cannot reach.
+
+[tasks."bootstrap:identity"]
+description = "Create the account groups and service principals the project depends on (idempotent)"
+run = "uv run --no-sync python scripts/bootstrap_identity.py"
+
+# --- Gates --------------------------------------------------------------------
+#
+# EVERY TASK RUNS PYTHON THROUGH uv, NEVER BARE python3.
+#
+# Fourteen tasks invoked `python3 scripts/...`, and every one ran on Homebrew's
+# Python 3.14.7 -- outside the project venv, two minor versions off the pinned
+# 3.12.3, with none of the locked dependencies importable. They worked only
+# because they happened to use nothing but the standard library.
+#
+# A bare interpreter name is PATH resolution, and PATH is ambient state this
+# repo does not control. policies/runtime/ denies it now rather than trusting
+# that nobody reintroduces it.
+
+[tasks.fmt]
+description = "Apply every safe autofix: formatting AND import ordering"
+# TWO OPERATIONS, NOT ONE. `ruff format` handles layout; import ORDERING is the
+# I lint rule, fixed by `ruff check --fix`. Treating fmt as though it covered
+# both meant every import change became a hand edit lint caught afterwards.
+#
+# `;` NOT `&&`, AND NOT `set -e`. ruff check --fix exits non-zero when a finding
+# has no safe autofix, which with && stopped the formatter running -- and the
+# formatter is often what resolves the remaining finding, since line-length is
+# fixed by rewrapping. The `lint` gate still reports both, so continuing hides
+# nothing.
+run = "uv run --no-sync ruff check --no-cache --fix . ; uv run --no-sync ruff format ."
+
+[tasks.lint]
+description = "Lint (the same invocation CI uses)"
+# WITHOUT --fix, DELIBERATELY. A CI job that fixes its own input can pass while
+# the committed code stays wrong.
+run = "uv run --no-sync ruff check --no-cache ."
+
+[tasks.types]
+description = "Static type check, for every platform this code runs on"
+# BOTH PLATFORMS, DELIBERATELY. mypy defaults to whichever OS it runs on and
+# NARROWS sys.platform comparisons, so a Darwin-only branch is invisible to a
+# Linux run and vice versa. This repo is a macOS laptop plus a Linux runner;
+# either gap is a branch nobody checks.
+#
+# mypy has no native multi-platform mode (python/mypy#12286); invoking it once
+# per target is the documented approach and far cheaper than a CI OS matrix.
+run = '''
+set -euo pipefail
+uv run --no-sync mypy --platform darwin
+uv run --no-sync mypy --platform linux
+'''
+
+[tasks.test]
+description = "Hermetic tests: no network, no credentials"
+# addopts in pyproject.toml deselects the integration marker, so this is safe in
+# check:offline behind the pre-push hook.
+run = "uv run --no-sync pytest"
+
+[tasks."test:integration"]
+description = "Tests requiring network and Databricks credentials"
+# WITHOUT THIS TASK THE INTEGRATION TESTS RUN NOWHERE. They are deselected from
+# the default run by design, so writing one and stopping there produces a test
+# that exists and never executes -- worse than no test, because it looks like
+# coverage.
+run = "uv run --no-sync pytest -m integration"
+
+[tasks.check]
+description = "The quality gate. CI runs exactly this task; nothing is restated in ci.yml"
+# SINGLE SOURCE OF TRUTH. A second copy of the gate list in ci.yml would drift
+# the moment a check is added here and forgotten there.
+#
+# NOT depends = [...]. mise runs dependencies in PARALLEL with no order and
+# reports failure as soon as one fails. Observed: `test` failed at 1.4s and
+# `types` never reported at all, because mypy was still running and nobody was
+# listening. A gate whose result is never printed is indistinguishable from one
+# that passed.
+#
+# scripts/check_all.py runs every gate to completion and reports all failures in
+# one pass. Serial and slower, deliberately: on a gate that runs every commit,
+# telling the whole truth beats a few seconds.
+run = "uv run --no-sync python scripts/check_all.py"
+
+[tasks."check:offline"]
+description = "The gate minus anything needing network or Databricks auth (git hooks)"
+# SAME LIST, FILTERED -- not a second list. scripts/check_all.py marks each gate
+# with whether it needs the network; --offline selects the rest.
+#
+# WHY HOOKS DO NOT RUN THE FULL GATE: prereqs and env-parity need a live
+# workspace and valid auth. A pre-commit that fails on a plane is one people
+# bypass with --no-verify, and a bypassed hook catches nothing. CI runs the full
+# gate; that is the layer where a bypass is caught.
+run = "uv run --no-sync python scripts/check_all.py --offline"
+
+[tasks."check:prereqs"]
+description = "Verify the unmanaged dependencies the bundle relies on"
+# Without this, a missing prerequisite surfaces as a bundle deploy failure with
+# an API error naming the symptom rather than the cause. This fails first and
+# prints the command that fixes it.
+run = "uv run --no-sync python scripts/check_prereqs.py"
+
+[tasks."check:env-parity"]
+description = "Fail if the local interpreter drifts from the deployed environment version"
+# NOT a comment saying "keep these in sync". The interpreter version necessarily
+# lives in two places -- .python-version drives the local toolchain,
+# environment_version drives the server -- and two copies of one fact drift.
+run = "uv run --no-sync python scripts/check_env_parity.py"
+
+[tasks."check:policy"]
+description = "Format, check, lint and unit-test every Rego policy"
+# --fail-on-empty is not optional: `opa test` SUCCEEDS when zero tests run, so a
+# renamed package or mistyped path would report green while testing nothing --
+# the silent-pass failure this repo removes everywhere else.
+run = '''
+set -euo pipefail
+opa fmt --fail --diff policies/
+opa check --strict policies/
+regal lint policies/
+opa test policies/ --fail-on-empty
+'''
+
+[tasks."check:policy-decisions"]
+description = "Evaluate this repo's own tasks against the policies"
+# THE SPLIT THAT IS KEPT, BECAUSE IT IS A DIFFERENCE IN KIND:
+#   check:policy            are the policies well-formed and tested?
+#   check:policy-decisions  does the CODEBASE satisfy them?
+#
+# A policy suite can be immaculate and enforce nothing. Only evaluating real
+# input proves the repo obeys its own rules.
+run = "uv run --no-sync python scripts/evaluate_policies.py"
+
+[tasks."deps:install"]
+description = "Install exactly what uv.lock pins, refusing a lock that no longer resolves"
+# --locked, NOT --frozen: --frozen installs a stale lock without complaint and
+# lets a later `uv run` fail for it under another step's name. --locked never
+# rewrites uv.lock, so starting this task cannot dirty the lockfile (D.9).
+run = "uv sync --locked"
+
+[tasks."check:ruleset"]
+description = "Verify develop and main are actually protected on the server"
+# Checks the ruleset's CONTENTS, not its existence: one edited to require
+# nothing is the failure mode that looks like success.
+#
+# NOT a dependency of `check` -- that runs on every commit and this needs
+# network plus gh auth, and a local commit cannot weaken a server-side ruleset.
+# Not a scheduled workflow either: GitHub disables those after 60 days of
+# repository inactivity, and a check that silently stops is worse than none.
+run = "uv run --no-sync python scripts/check_ruleset.py"
+
+[tasks."check:fixtures"]
+description = "Fail if the committed fixture no longer matches the bundle"
+# A STALE FIXTURE FAILS CONFUSINGLY WITHOUT THIS. Adding a grants block left the
+# fixture describing the old shape and the test reported "volumes.X has no
+# grants key" -- which reads as a bundle defect and is actually a capture nobody
+# refreshed.
+run = "uv run --no-sync python scripts/update_fixtures.py --check"
+
+# --- Onboarding ---------------------------------------------------------------
+
+[tasks.setup]
+description = "One-command onboarding: dependencies and git hooks"
+# `lefthook install` writes into .git/hooks, which is NOT version controlled. A
+# fresh clone has no hooks at all, so the person who most needs the guardrails
+# is the one running without them.
+#
+# NO `mise install` ANY MORE. It installed the [tools] block, which is gone;
+# leaving it would be a step that appears to provision a toolchain and does
+# nothing. `nix develop` provisions it, and task_config enters that shell.
+#
+# NEVER ADD -f TO lefthook install. Without it, lefthook declines when
+# core.hooksPath points elsewhere. With it, lefthook force-installs into
+# whatever that path resolves to -- and when that is a GLOBAL hooks directory,
+# this repo's hooks start running in every repository on the machine. A real
+# 2026 incident; the fix was deleting the flag.
+#
+# THE QUOTING IS LOAD-BEARING. TOML basic strings treat backslash as an escape
+# opener, so a shell body containing `\.sample` fails to parse -- this task was
+# written that way first and broke the whole config. Literal strings (three
+# single quotes) do no escape processing.
+run = '''
+set -euo pipefail
+
+hooks_path="$(git config --get core.hooksPath || true)"
+if [ -n "$hooks_path" ]; then
+  echo "refusing: core.hooksPath is set to '$hooks_path'." >&2
+  echo "lefthook would decline rather than clobber it, which is correct --" >&2
+  echo "but you would be left with no hooks and no explanation." >&2
+  echo "" >&2
+  echo "inspect first:" >&2
+  echo "  git config --show-origin --get-all core.hooksPath" >&2
+  echo "then clear it deliberately:" >&2
+  echo "  git config --unset core.hooksPath          # local" >&2
+  echo "  git config --global --unset core.hooksPath # global" >&2
+  exit 1
+fi
+
+uv sync --locked
+lefthook install
+
+echo
+echo "setup complete. hooks active:"
+# RESOLVE THE HOOKS PATH; NEVER ASSUME .git/hooks. In a linked worktree .git is
+# a FILE pointing at .git/worktrees/<name>, so `ls .git/hooks` fails with "Not a
+# directory" -- and that cosmetic listing once took the exit code with it after
+# every real step had succeeded.
+hooks_dir="$(git rev-parse --git-path hooks)"
+if [ -d "$hooks_dir" ]; then
+  ls "$hooks_dir" | grep -v sample | sed 's|^|  |'
+else
+  echo "  (none found at $hooks_dir)"
+fi
+'''
+
+# --- Workflow -----------------------------------------------------------------
+# EVERY PROJECT OPERATION IS A TASK. Not a remembered command, not a paste from
+# scrollback. A one-off CLI invocation is behavior that exists only in one
+# person's history: untested, undiscoverable, impossible to change deliberately.
+#
+# NOTE: there is no `start` task. It ran `git switch -c` inside a mise task,
+# which runs in a SUBSHELL -- so the switch died with that subshell and the
+# caller stayed on develop, while the task printed "on feature/x" and reported
+# success. `start:here` PRINTS the command for the caller to eval instead, and
+# `start:check` fails loudly when work happens on a protected branch anyway.
+#
+# NOTE: there is no pr-wait task. `gh pr checks --watch` exits immediately when
+# no check has registered yet, so it reported "no checks reported" and returned
+# a verdict it had not determined. `pr` waits properly, in three bounded phases.
+
+[tasks.commit]
+description = "Commit exactly the named paths with a conventional message, through the hooks"
+# COMMITTING WAS NEVER A TASK, and it is the operation performed most often here.
+# Every commit was `git commit --file /tmp/msg.txt --no-verify`, which skipped
+# start:check, fmt and lint on every single one -- the gate was reached only at
+# push time.
+#
+# NAMED PATHS, NEVER -A: a stray zero-byte file was swept into a commit that way.
+# The outcome is a command-outcome/v1 envelope on stdout and 0, 1 or 2 as the
+# exit code, so a caller branches on a refusal without parsing a word.
+#
+#   mise run commit -- --message "feat(x): subject" --path scripts/x.py
+run = "uv run --no-sync python scripts/commit.py"
+
+[tasks.pr]
+description = "Open a PR and block until it is merged"
+# BLOCKS, HAVING ORIGINALLY NOT. The first version enabled auto-merge and
+# returned with state BLOCKED, moving the cost to the person -- who watched the
+# Actions tab and confirmed the merge by hand on twelve pull requests.
+#
+# Three phases, because waiting for checks to APPEAR and waiting for them to
+# FINISH are different problems. Each is bounded: an unbounded wait hangs when
+# something upstream never resolves, teaching the person nothing.
+run = "uv run --no-sync python scripts/pr.py"
+
+[tasks."pr-status"]
+description = "Show merge state and checks for the current branch's PR"
+run = "gh pr view --json number,title,mergeable,mergeStateStatus,autoMergeRequest,statusCheckRollup --jq '{pr:.number,title,mergeable,state:.mergeStateStatus,auto:(.autoMergeRequest != null),checks:[.statusCheckRollup[]|{name,conclusion}]}'"
+
+[tasks.sync]
+description = "Return to develop, pull, and remove branches that are safe to remove"
+# STATE-DRIVEN, NOT A PIPELINE. This piped `git for-each-ref` through awk and
+# deleted whatever reported [gone]. It worked until a worktree held one of those
+# branches: git refused -- correctly -- and the task ABORTED after the pull had
+# succeeded, leaving the sync half done.
+#
+# Cleanup had no model of what it was cleaning. scripts/repo_state.py answers
+# protection, merge status and worktree ownership at once, and reports what it
+# did NOT remove and why.
+run = "uv run --no-sync python scripts/sync.py"
+
+[tasks.status]
+description = "Show branch, working tree, and how it relates to develop"
+# READ OPERATIONS ARE PROJECT OPERATIONS TOO. `git status` typed by hand is
+# still a throw-away CLI: the next person guesses which flags matter.
+run = '''
+set -euo pipefail
+echo "branch:   $(git rev-parse --abbrev-ref HEAD)"
+echo "upstream: $(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo '(none)')"
+echo
+echo "--- working tree ---"
+if [ -z "$(git status --porcelain)" ]; then
+  echo "clean"
+else
+  git status --short
+fi
+echo
+echo "--- unmerged into develop ---"
+git log --oneline develop..HEAD 2>/dev/null || echo "(on develop)"
+echo
+echo "--- local branches ---"
+git branch -vv
+'''
+
+[tasks."start:check"]
+description = "Refuse to work on a protected branch"
+# Wired into the pre-commit hook so the guard fires before a commit lands rather
+# than after. Fails closed, which is what an unattended run needs: it will not
+# notice a warning, but it will notice a non-zero exit.
+run = '''
+set -euo pipefail
+branch="$(git rev-parse --abbrev-ref HEAD)"
+case "$branch" in
+  develop|main)
+    echo "refusing: on protected branch '$branch'." >&2
+    echo "" >&2
+    echo "GitFlow: work happens on a feature branch cut from origin/develop." >&2
+    echo "" >&2
+    echo "nothing is lost -- carry the work across with:" >&2
+    echo "  git switch -c feature/<slug>" >&2
+    echo "or start cleanly with:" >&2
+    echo "  eval \"\$(mise run start:here <slug>)\"" >&2
+    exit 1 ;;
+esac
+echo "on $branch (not protected)"
+'''
+
+[tasks."start:here"]
+description = "Cut a feature branch from origin/develop in THIS shell"
+# PRINTS the command instead of pretending to run it, because a mise task runs
+# in a subshell and cannot change the invoking shell's branch:
+#
+#   eval "$(mise run start:here <slug>)"
+#
+# Uncommitted work carries across automatically: `git switch -c` keeps the
+# working tree, so a modified file on develop lands on the new branch.
+usage = '''
+arg "<slug>" help="Short kebab-case description, e.g. assignment-01-spark-api"
+'''
+run = '''
+set -euo pipefail
+slug="$usage_slug"
+
+case "$slug" in
+  *[!a-z0-9-]*|"")
+    echo "echo 'slug must be lowercase kebab-case: $slug' >&2; false" ;;
+  *)
+    echo "git fetch origin --prune --quiet && git switch -c feature/$slug origin/develop" ;;
+esac
+'''
+
+# --- Planning -----------------------------------------------------------------
+
+[tasks."plan:trace"]
+description = "Check the plan, its trace and its id ledger agree, and report it as data"
+# A MATRIX NOBODY VERIFIES IS AN ARCHIVE: it looks complete because nothing
+# contradicts it. This names an item no source authorises, a claim about an
+# item the plan dropped, an id never issued and a retired id back in use. The
+# same checks run in the test gate; this is the question asked directly.
+run = "uv run --no-sync python scripts/plan_files.py"
+
+[tasks."plan:status"]
+description = "Decide each step's state from the evidence on origin/develop, and record it"
+# THE DECISION IS POLICY. This observes what holds on the integration branch,
+# policies/plan decides each step's state, and the decision is recorded under
+# .artifacts/plan-status/ so progress is compared from data, not from memory.
+run = "uv run --no-sync python scripts/plan_status.py"
+
+[tasks."plan:trailers"]
+description = "Refuse a commit that names no plan step, or one never issued or retired"
+# TWO POINTS, ONE POLICY. With a message file it is the commit-msg hook; with
+# none it judges every commit on this branch since origin/develop, as the gate does.
+usage = '''
+arg "[message]" help="A commit message file; the branch since origin/develop when omitted"
+'''
+run = 'uv run --no-sync python scripts/plan_trailers.py ${usage_message:-}'
+
+[tasks."plan:matrix"]
+description = "Derive the requirement matrix, record it, and refuse what fails to trace"
+# DERIVED, NEVER WRITTEN BY HAND. Every change on develop must trace to a step,
+# and every done step to the change that did it; policies/plan decides.
+run = "uv run --no-sync python scripts/plan_matrix.py"
+
+[tasks."repo:state"]
+description = "Observe every worktree and long-lived branch as typed evidence, and record the run"
+# EVIDENCE AS DATA: repository-state/v1, verdicts as booleans, never console prose.
+run = "uv run --no-sync python scripts/repo_report.py"
+
+[tasks."runs:verify"]
+description = "Verify the run ledger's hash chain is intact, and record the run"
+# A BROKEN CHAIN IS REFUSED AND NOT APPENDED TO, so the break stays visible.
+run = "uv run --no-sync python scripts/run_ledger.py"
+
+[tasks."pr:logs"]
+description = "Read the current branch's latest failed CI run as typed data, and record the run"
+# EVIDENCE AS DATA: ci-failure/v1, the failing steps and their lines as records.
+run = "uv run --no-sync python scripts/pr_logs.py"
+
+[tasks."bundle:deploy"]
+description = "Validate the bundle strictly, then deploy it to a target (dev unless named)"
+# VALIDATE --strict BEFORE EVERY DEPLOY. 2026 practice makes validate the reflex
+# before deploy, and --strict because a plain validate reports an unknown
+# property only as a warning -- and a job once deployed without its task.
+# prod needs no extra guard here: production mode refuses any branch but main.
+usage = '''
+arg "[target]" default="dev" help="Bundle target: dev, or prod from main"
+'''
+run = 'databricks bundle validate --strict -t "${usage_target}" && databricks bundle deploy -t "${usage_target}"'
+
+[tasks."bundle:run"]
+description = "Run a deployed job and wait for it, failing when the job fails"
+# WAITS. bundle run exits non-zero when the job fails, so a failed run fails the
+# task; --no-wait would report success for work not done.
+usage = '''
+arg "<job>" help="Job key in the bundle, e.g. assignment_02_etl"
+arg "[target]" default="dev" help="Bundle target"
+'''
+run = 'databricks bundle run -t "${usage_target}" "${usage_job?}"'
+
+[tasks.run]
+description = "Run any task, stream its output to the console, and record the run in the ledger"
+# EVERY OPERATION GOES THROUGH HERE: mise run run <task> [arguments...]. raw_args passes
+# every argument -- --help included -- untouched, and no usage spec reinterprets any.
+raw_args = true
+run = "uv run --no-sync python scripts/run_task.py"
+
+[tasks."export:copy"]
+description = "Copy a released assignment's HTML export to ~/Downloads, named for its tag, verified"
+# ONLY RELEASED WORK LEAVES THE REPOSITORY, never over an existing file, digest-checked.
+usage = 'arg "<assignment>" help="Assignment folder, e.g. assignment-02"'
+run = 'uv run --no-sync python scripts/export_copy.py "${usage_assignment?}"'
+
+[tasks."plan:step"]
+description = "Read one plan step as validated data and exactly as written, with line numbers"
+# THE VALIDATED STEP AND ITS BLOCK AS WRITTEN: an edit anchors on real text, not a guess.
+usage = 'arg "<id>" help="Step id, e.g. D.12"'
+run = 'uv run --no-sync python scripts/plan_step.py "${usage_id?}"'
+
+[tasks."tasks:list"]
+description = "List every task mise will run, with its description and source, as data"
+# MISE'S OWN INVENTORY, validated: the audit reads what exists, not a recollection.
+run = "uv run --no-sync python scripts/tasks_list.py"
+
+[tasks."deps:add"]
+description = "Add a dependency with uv and its lock, refusing any change to packages already locked"
+# AN ADDITION ONLY ADDS: a stale lock, or any locked package changed or removed, is
+# refused and both files restored. raw_args passes --group <name> through untouched.
+raw_args = true
+run = "uv run --no-sync python scripts/deps_add.py"
+
+[tasks."plan:add"]
+description = "Add plan steps, their ids and one trace entry from a spec, preserving every comment"
+# tomlkit keeps every comment; the three files are validated together before any is written.
+usage = 'arg "<spec>" help="TOML spec: [[steps]] and one [trace]"'
+run = 'uv run --no-sync python scripts/plan_edit.py add "${usage_spec?}"'
+
+[tasks."plan:amend"]
+description = "Replace named fields of one plan step from a spec, preserving every comment"
+usage = 'arg "<spec>" help="TOML spec: id, and a [set] table of fields"'
+run = 'uv run --no-sync python scripts/plan_edit.py amend "${usage_spec?}"'
+
+[tasks."plan:init"]
+description = "Start this project's plan, trace and id ledger, refusing when a plan already exists"
+# A GENERATED PROJECT'S SECOND OPERATION, after identity:set: its plan starts here.
+run = "uv run --no-sync python scripts/plan_init.py"
+
+[tasks."identity:set"]
+description = "Set the project identity from a spec: every declared slot and the declaration, all or nothing"
+# THE FIRST OPERATION A GENERATED PROJECT RUNS: every slot is rewritten, or none is.
+usage = 'arg "<spec>" help="TOML spec: name, catalog, reader_group, ci_principal, default_schema, repository"'
+run = 'uv run --no-sync python scripts/project_identity.py "${usage_spec?}"'
+
+[tasks."template:new"]
+description = "Generate a new project from this template on GitHub, pinned to a commit, or refuse"
+# THE SOURCE IS THE DECLARED REPOSITORY AND THE REF A FULL SHA: no laptop path, no HEAD.
+usage = '''
+arg "<destination>" help="An absent or empty directory outside this repository"
+arg "<ref>" help="A full 40-character commit sha of this template"
+'''
+run = 'uv run --no-sync python scripts/template_new.py "${usage_destination?}" "${usage_ref?}"'
+
+[tasks."template:init"]
+description = "Make a generated project a git repository: the template as one commit on main, and develop"
+# THE BASELINE copier update DIFFS AGAINST: refused unless generated, new to git, and outside.
+usage = 'arg "<destination>" help="A directory template:new generated, not yet a repository"'
+run = 'uv run --no-sync python scripts/template_init.py "${usage_destination?}"'
+
+[tasks."template:identity"]
+description = "Give a fresh generated project its identity from a spec, as its second commit"
+# ONE COMMIT AND NO REMOTE, OR REFUSED: identity is taken once, before publishing.
+usage = '''
+arg "<destination>" help="A project template:init made: one commit, no remote"
+arg "<spec>" help="TOML spec: name, catalog, reader_group, ci_principal, default_schema, repository"
+'''
+run = 'uv run --no-sync python scripts/template_identity.py "${usage_destination?}" "${usage_spec?}"'
+
+[tasks."template:publish"]
+description = "Publish a generated project: create it on GitHub, push main and develop, default develop"
+# RIGHT AFTER template:init: everything later arrives through a pull request.
+usage = '''
+arg "<destination>" help="A project template:init made: clean, with no remote"
+arg "<repository>" help="owner/name on GitHub"
+arg "<visibility>" help="public or private"
+'''
+run = 'uv run --no-sync python scripts/template_publish.py "${usage_destination?}" "${usage_repository?}" "${usage_visibility?}"'
+
+[tasks."template:discard"]
+description = "Remove an unpublished generated project that holds only its generated commit"
+# IRREVERSIBLE, SO EVERY REFUSAL IS OBSERVED FIRST: generated, no symlink, no remote,
+# one commit, clean, not this repository or home, rmtree resistant to symlink attacks.
+usage = '''
+arg "<destination>" help="A project template:init made that nothing has touched since"
+'''
+run = 'uv run --no-sync python scripts/template_discard.py "${usage_destination?}"'
+
+[tasks."source:restore"]
+description = "Discard changes to tracked paths, back to HEAD; a dry run unless --yes, refusing untracked paths"
+# NEVER DROPS A NEW FILE: a path HEAD has never seen is refused. raw_args passes --yes.
+raw_args = true
+run = "uv run --no-sync python scripts/source_restore.py"
+
+[tasks."source:units"]
+description = "Read named functions and classes from a Python file by syntax tree, with their line ranges"
+# EXACTLY AS WRITTEN, whatever the formatter made of it: an edit anchors on real text.
+raw_args = true
+run = "uv run --no-sync python scripts/source_units.py"
+
+[tasks."source:read"]
+description = "Read a file's lines, numbered, as data; refusing a missing file or a range past its end"
+raw_args = true
+run = "uv run --no-sync python scripts/source_read.py"
+
+[tasks."source:search"]
+description = "Search tracked source for a pattern, its matches as path, line and text records"
+# git grep -n -z: NUL-separated, so a path with a colon is unambiguous; tracked files only.
+raw_args = true
+run = "uv run --no-sync python scripts/source_search.py"
+
+[tasks."repo:history"]
+description = "Read commit history as data: subject, authored time, trailers and files, newest first"
+# NUL- AND CONTROL-BYTE-SEPARATED, as git's own %(trailers) options allow: nothing can break the parse.
+raw_args = true
+run = "uv run --no-sync python scripts/repo_history.py"
+
+[tasks."source:structure"]
+description = "Describe a TOML or JSON file's top-level structure, or a Pydantic model's JSON schema, as data"
+raw_args = true
+run = "uv run --no-sync python scripts/source_structure.py"
+
+# --- Authentication -----------------------------------------------------------
+
+[tasks."auth:login"]
+description = "Authenticate this machine to Databricks (interactive, one-time)"
+# WRITES THE DEFAULT PROFILE, NOT A NAMED ONE, AND THAT IS THE WHOLE POINT.
+# The CLI resolves environment variables, then the DEFAULT profile, stopping at
+# the first success -- so a laptop falls through to DEFAULT and CI stops at its
+# own env vars. Identical code runs in both.
+#
+# A NAMED profile must be selected with -p, which needs a heuristic to decide
+# when to pass it, which must be right in every environment. This repo shipped
+# `--profile cscie103` first and spent four CI failures unwinding it.
+run = '''
+set -euo pipefail
+host="https://dbc-c7e8aa56-e393.cloud.databricks.com"
+
+databricks auth login --host "$host" --profile DEFAULT
+
+# REMOVE ANY OTHER PROFILE FOR THIS HOST, BECAUSE TWO IS THE BUG. When more than
+# one profile matches, host-based resolution errors with "multiple profiles
+# matched" -- which happened here from a stale profile kept "just in case". An
+# unused credential that changes resolution behaviour is not inert.
+#
+# `auth logout --delete` clears the cached OAuth token AND removes the profile.
+# Editing .databrickscfg by hand orphans the token in the OS keychain.
+stale="$(databricks auth profiles --output json \
+  | uv run --no-sync python -c "
+import sys, json
+host = '$host'.rstrip('/')
+for p in json.load(sys.stdin).get('profiles', []):
+    if p.get('name') != 'DEFAULT' and p.get('host', '').rstrip('/') == host:
+        print(p['name'])
+")"
+
+for profile in $stale; do
+  echo "removing stale profile: $profile"
+  databricks auth logout "$profile" --delete --auto-approve
+done
+
+echo
+databricks auth profiles
+echo
+databricks auth describe
+'''
+
+[tasks."auth:describe"]
+description = "Report which credentials the CLI resolved, and from where"
+# The diagnostic that ended a four-attempt debugging loop: it reports the
+# resolved auth type and the SOURCE of every field, which is what finally showed
+# authentication was fine and bundle host resolution was not.
+run = "databricks auth describe"
+
+[tasks."auth:rotate-ci-secret"]
+description = "Rotate the CI service principal's OAuth secret into GitHub"
+# THE SECRET IS NEVER RENDERED. API -> stdin -> gh secret set, never through a
+# variable, a file, or a terminal. An earlier secret here was generated with a
+# bare `databricks api post`, printed, and had to be revoked -- it was in
+# scrollback, shell history, and any session log. The remedy is not "remember to
+# be careful"; it is that the only committed way to do this cannot print.
+#
+# 90-DAY LIFETIME: a credential with no expiry is one nobody rotates.
+#
+# The OLD secret is not revoked automatically -- revoking first would break every
+# run between rotation and the next successful deploy.
+run = '''
+set -euo pipefail
+sp_id="$(databricks api get /api/2.0/account/scim/v2/ServicePrincipals \
+  | uv run --no-sync python -c "
+import sys, json
+for r in json.load(sys.stdin).get('Resources', []):
+    if r.get('displayName') == 'cscie103-ci':
+        print(r['id'])
+")"
+
+if [ -z "$sp_id" ]; then
+  echo "cscie103-ci not found; run 'mise run bootstrap:identity' first" >&2
+  exit 1
+fi
+
+databricks api post \
+  "/api/2.0/accounts/servicePrincipals/$sp_id/credentials/secrets" \
+  --json '{"lifetime":"7776000s"}' \
+  | uv run --no-sync python -c "import sys, json; print(json.load(sys.stdin)['secret'], end='')" \
+  | gh secret set DATABRICKS_CLIENT_SECRET
+
+echo "rotated. active secrets:"
+databricks api get "/api/2.0/accounts/servicePrincipals/$sp_id/credentials/secrets" \
+  | uv run --no-sync python -c "
+import sys, json
+d = json.load(sys.stdin)
+for s in d.get('secrets', d.get('Resources', [])):
+    print(f\"  {s['id'][:12]}... {s['status']} expires {s['expire_time']}\")
+"
+echo
+echo "verify CI passes, THEN revoke the old secret id above with:"
+echo "  databricks api delete /api/2.0/accounts/servicePrincipals/$sp_id/credentials/secrets/<old-id>"
+'''
+
+# --- Repository configuration -------------------------------------------------
+
+[tasks."repo:configure"]
+description = "Apply repository settings and branch ruleset (idempotent)"
+# REPOSITORY SETTINGS ARE INFRASTRUCTURE. Clicked in a web UI they are invisible
+# to the repo, unreviewable and unreproducible. Found the hard way: `mise run
+# pr` failed with "Auto merge is not allowed for this repository" AFTER pushing
+# and creating the PR.
+#
+# TWO HALVES, AND THE SECOND MAKES THE FIRST MEAN ANYTHING:
+#   settings  allow auto-merge, merge commits only, delete branch on merge
+#   ruleset   protect develop and main, and REQUIRE the quality gate
+#
+# Without a REQUIRED status check, auto-merge has nothing to wait for and fires
+# immediately -- worse than no auto-merge, because it looks like a gate.
+#
+# MERGE COMMITS ONLY: GitFlow depends on merge topology, and squashing would
+# collapse commits whose reasoning is the most valuable thing here.
+#
+# required_approving_review_count IS 0 because this is a solo repository.
+# Requiring a review nobody can give would block every merge; the gate is CI.
+run = '''
+set -euo pipefail
+
+gh api -X PATCH "repos/{owner}/{repo}" \
+  -F allow_auto_merge=true \
+  -F allow_merge_commit=true \
+  -F allow_squash_merge=false \
+  -F allow_rebase_merge=false \
+  -F delete_branch_on_merge=true \
+  > /dev/null
+echo "settings applied"
+
+name="develop-and-main-protection"
+existing="$(gh api "repos/{owner}/{repo}/rulesets" --jq \
+  ".[] | select(.name == \"$name\") | .id" || true)"
+
+if [ -n "$existing" ]; then
+  gh api -X PUT "repos/{owner}/{repo}/rulesets/$existing" \
+    --input contracts/ruleset-develop-and-main.json > /dev/null
+  echo "ruleset updated (id $existing)"
+else
+  gh api -X POST "repos/{owner}/{repo}/rulesets" \
+    --input contracts/ruleset-develop-and-main.json > /dev/null
+  echo "ruleset created"
+fi
+
+echo "--- readback ---"
+gh api "repos/{owner}/{repo}" \
+  --jq '{auto_merge:.allow_auto_merge, merge_commit:.allow_merge_commit, squash:.allow_squash_merge, rebase:.allow_rebase_merge, delete_on_merge:.delete_branch_on_merge}'
+gh api "repos/{owner}/{repo}/rulesets" \
+  --jq '.[] | {id, name, enforcement}'
+'''
+
+# --- Assignment data ----------------------------------------------------------
+
+[tasks."data:load"]
+description = "Upload assignment source data into the Unity Catalog volume (idempotent)"
+# The volume is declared by the bundle; its CONTENTS are not, because parquet is
+# binary the repo will not carry. Skips files whose remote size already matches.
+run = "uv run --no-sync python scripts/load_assignment_data.py"
+
+[tasks."fixtures:update"]
+description = "Recapture the resolved-bundle fixture with identity redacted"
+# Captured from the real command so shape drift breaks a test instead of
+# silently killing a policy rule -- which happened once here.
+#
+# Redacted at CAPTURE because the address cannot be eliminated at source: the
+# dev target deploys to /Workspace/Users/<email>/..., which is correct, since a
+# user-scoped path keeps deployments out of /Workspace/Shared.
+#
+# NOT a shell redirect. `bundle validate --output json > fixture.json` is how
+# this was first captured, and it committed three email addresses.
+run = "uv run --no-sync python scripts/update_fixtures.py"
+
+# --- Worktrees ----------------------------------------------------------------
+# Linked worktrees let one task proceed while another is mid-review, without
+# stashing or a second clone.
+#
+# ARGUMENTS COME FROM THE usage SPEC, NOT A TERA TEMPLATE. {{arg(name='slug')}}
+# works today and mise removes it in a future release. Tera's failure shapes are
+# the ones this repo keeps finding: template functions return EMPTY STRINGS
+# during spec collection, and behaviour differs between TOML and file tasks.
+#
+# THE ? IN ${usage_slug?} IS THE POINT: bash parameter expansion that FAILS when
+# the variable is unset rather than expanding to empty -- without it a missing
+# argument becomes `worktree.py refresh ""`, a command that runs and does
+# something nobody asked for.
+
+[tasks."worktree:add"]
+description = "Create a sibling worktree on a new feature branch, with setup run"
+# Creates <repo>-<slug> beside the main clone, then runs `mise run setup` inside
+# it. Without that a fresh worktree has no .venv and no hooks, so the gate
+# cannot run and a commit is refused.
+usage = '''
+arg "<slug>" help="Short kebab-case description, e.g. workstation-as-code"
+'''
+run = 'uv run --no-sync python scripts/worktree.py add "${usage_slug?}"'
+
+[tasks."worktree:list"]
+description = "List worktrees, their branches, and any locked or prunable flags"
+run = "uv run --no-sync python scripts/worktree.py list"
+
+[tasks."worktree:remove"]
+description = "Remove a worktree and delete its branch, refusing to force either"
+# `git worktree remove` refuses on modified or untracked files and `git branch
+# -d` refuses unmerged work. Neither is forced: the first prevents losing an
+# uncommitted change, the second doubles as proof the merge happened.
+usage = '''
+arg "<slug>" help="The slug used with worktree:add"
+'''
+run = 'uv run --no-sync python scripts/worktree.py remove "${usage_slug?}"'
+
+[tasks."worktree:refresh"]
+description = "Rebase a worktree's branch onto current origin/develop"
+# A worktree cut days ago is built on a develop that no longer exists.
+#
+# REFUSES ON A DIRTY TREE rather than using --autostash. git's own manual warns
+# that "the final stash application after a successful rebase might result in
+# non-trivial conflicts", and rebase.autoStash defaults to false for that
+# reason. Autostash hides work in a stash nobody created.
+usage = '''
+arg "<slug>" help="The slug used with worktree:add"
+'''
+run = 'uv run --no-sync python scripts/worktree.py refresh "${usage_slug?}"'
+
+# --- Release ------------------------------------------------------------------
+
+[tasks.release]
+description = "Promote develop to main, export the executed run, and tag it"
+# A RELEASE IS ONE OPERATION, NOT A SEQUENCE SOMEONE REMEMBERS.
+#
+# main advanced once with no release performed -- no export, no tag, no
+# submission -- because someone clicked GitHub's "Compare & pull request"
+# banner. The ruleset allowed it correctly: a PR and a green gate, both
+# satisfied. Nothing said WHEN main may advance, so that rule lived in commit
+# prose and enforced nothing.
+#
+# THE EXPORT IS OF THE RUN, NOT THE NOTEBOOK. The bundle deploys the notebook as
+# SOURCE; the outputs belong to the run. Exporting the workspace file would give
+# the file the job READ -- empty cells that look like a valid submission.
+usage = '''
+arg "<job>" help="Job key in the bundle, under resources.jobs"
+arg "<tag>" help="Release tag naming that assignment, e.g. assignment-01-v3"
+'''
+run = 'uv run --no-sync python scripts/release.py "${usage_job?}" "${usage_tag?}"'

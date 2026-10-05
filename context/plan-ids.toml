@@ -1,0 +1,6 @@
+# context/plan-ids.toml
+# Every id this plan has issued, append-only (id-ledger/v1): none is ever reused.
+contract = "id-ledger/v1"
+issued = [
+  { id = "A.1", first_title = "The project is generated from the platform template" },
+]

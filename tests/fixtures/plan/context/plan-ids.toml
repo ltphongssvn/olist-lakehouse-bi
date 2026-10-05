@@ -1,0 +1,10 @@
+# tests/fixtures/plan/context/plan-ids.toml
+# The fixture plan's issued ids (D.53), append-only like any project's.
+contract = "id-ledger/v1"
+issued = [
+  { id = "D.12", first_title = "A fixture step that a duplicate id collides with" },
+  { id = "D.22", first_title = "A fixture step that probes depend on" },
+  { id = "D.32", first_title = "A fixture step whose evidence an amendment replaces" },
+  { id = "X.1", first_title = "A fixture decision that plan:step reads" },
+  { id = "X.3", first_title = "A fixture decision that an amendment changes" },
+]

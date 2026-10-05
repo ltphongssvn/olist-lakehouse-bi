@@ -1,0 +1,218 @@
+# databricks.yml
+# Declarative Automation Bundle -- the desired state of this project in Databricks.
+#
+# SCOPE BOUNDARY, AND WHY THE CATALOG IS NOT HERE:
+#   CORRECTION to an earlier version of this comment: catalogs ARE a bundle
+#   resource type (see databricks/cli#5183 for a working catalogs block). The
+#   real constraint is narrower and still decisive: a declared catalog is always
+#   CREATED via POST /catalogs, and `bundle deployment bind` cannot adopt UC
+#   catalogs or external locations (databricks/cli#4842). The catalog
+#   already exists, so declaring it here guarantees a create-conflict on first
+#   deploy with no adoption path out.
+#
+#   It is therefore an explicit PREREQUISITE, checked rather than assumed --
+#   see `mise run check:prereqs`. Naming an unmanaged dependency is honest;
+#   silently depending on it is the drift this repo exists to prevent.
+#
+# WHAT MUST NEVER BE DECLARED HERE:
+#   A schema under resources.schemas is treated as FULLY MANAGED -- the bundle
+#   will create or drop it, and there is no grant-only mode for UC objects. The
+#   existing `default` and `lab_00` schemas are consequently off limits: adding
+#   them would put a destructive plan one `bundle destroy` away from real work.
+#   Only the project's own schema, which does not yet exist, is declared.
+
+bundle:
+  name: cscie103-data-engineering
+
+include:
+  - resources/*.yml
+
+# --- Targets -------------------------------------------------------------------
+# dev is default so an unqualified `bundle deploy` cannot reach prod by accident.
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # NO host MAPPING HERE, AND THAT IS THE POINT.
+      #
+      # Pinning workspace.host sends bundle commands down a DIFFERENT auth path
+      # than every other command: cmd/root/bundle.go configureProfile falls back
+      # to the default profile ONLY when the bundle declares no workspace.host
+      # and no workspace.profile, and the host-empty guard preserves SDK
+      # host-based resolution when the bundle pins its own host. Host-based
+      # resolution means "find a profile in .databrickscfg matching this host",
+      # which REQUIRES that file to exist.
+      #
+      # On a CI runner it does not exist, so `bundle validate` died with "cannot
+      # parse config file" while `databricks auth describe` succeeded in the same
+      # step with the same OAuth M2M credentials -- because non-bundle commands
+      # never enter that path. This divergence is filed repeatedly against the
+      # CLI (databricks/cli#4502, #1358).
+      #
+      # The host now comes from DATABRICKS_HOST, set in mise.toml for local work
+      # and in ci.yml for the runner. That also makes this bundle portable rather
+      # than hardcoded to one workspace.
+      # DEPLOY TO A PATH OWNED BY THE DEPLOYING IDENTITY, per Databricks' own
+      # template guidance: avoid /Shared, which is writable by every workspace
+      # user. On a single-user Free Edition workspace this changes nothing today;
+      # it is here so the habit does not have to be retrofitted later.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      # THE PREFIX IS ACCEPTED, NOT SUPPRESSED.
+      #
+      # development mode renames schemas: the CLI sanitises "[dev <user>] " into
+      # "dev_<user>_", so a schema deploys as dev_<user>_<schema>.
+      # That is a legal UC identifier -- an earlier draft of this file wrongly
+      # assumed it would be illegal and reached for
+      # experimental.skip_name_prefix_for_schema to stop it.
+      #
+      # That flag is the wrong tool even though it works. A resource's NAME IS
+      # ITS IDENTITY to the bundle, so turning it on after a deploy makes the CLI
+      # create unprefixed schemas and DELETE the prefixed ones, data included.
+      # Before the first deploy is the only free moment to choose, so we choose
+      # the pattern that needs no flag at all: accept the rename, and let
+      # consumers read the effective name from this variable.
+      schema_prefix: dev_${workspace.current_user.short_name}_
+
+  # A SYNTHETIC TARGET FOR FIXTURE CAPTURE. NEVER DEPLOYED.
+  #
+  # tests/fixtures/bundle-resolved-fixture-target.json exists so policy rules are written
+  # against the shape the CLI really produces. Capturing `dev` made that fixture
+  # identity-dependent: 19 occurrences across 8 fields -- paths, resource names,
+  # volume paths, tags, variable defaults -- because dev mode prefixes names with
+  # the deployer and deploys to a user-scoped path. CI runs as a service
+  # principal and a laptop runs as a person, so the same bundle resolved
+  # differently and the check failed in CI while passing locally.
+  #
+  # Scrubbing those fields was a losing game: the next bundle change adds another
+  # place for identity to appear. The snapshot-testing guidance is to INJECT a
+  # deterministic input rather than scrub nondeterministic output, and this is
+  # that -- the same technique the Databricks Bundle Inspector uses, a synthetic
+  # probe target that resolves without workspace identity.
+  #
+  # NO mode:, so no name prefix and no dev tags.
+  # NO current_user in root_path, so no identity in any path.
+  # Deploying this would be meaningless; check:policy-decisions and the fixture
+  # tests are its only consumers.
+  fixture:
+    workspace:
+      # NOT /Workspace/Shared, which is writable by every workspace user and
+      # earns a validator warning. Silencing that with a permissions block would
+      # pretend this target is deployed; it is not. The path only has to be
+      # identity-free, and a non-existent one is the most honest choice -- the
+      # target exists solely so `bundle validate` resolves deterministically.
+      root_path: /Workspace/.bundle-fixture-never-deployed/${bundle.name}
+    variables:
+      schema_prefix: ''
+      # example.invalid is the RFC-reserved TLD, guaranteed never to resolve.
+      # This target is never deployed, so nothing is ever sent here.
+      owner_email: owner@example.invalid
+
+  prod:
+    mode: production
+    # THE DEPLOYMENT TOOL ENFORCES GITFLOW, NOT A CONVENTION.
+    # production mode validates the current git branch against this value and
+    # refuses to deploy otherwise (overridable only with --force), so a prod
+    # deploy from a feature branch is impossible by accident.
+    git:
+      branch: main
+    workspace:
+      # No host mapping -- see the dev target above for why.
+      # NOT A USER PATH, DELIBERATELY DIFFERENT FROM dev ABOVE.
+      # production mode REJECTS user-specific paths and expects run_as and
+      # permissions. Copying the dev root_path here -- which this file did until
+      # now -- would have failed on the first prod deploy.
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    # run_as AND permissions ARE REQUIRED HERE, NOT OPTIONAL POLISH.
+    #
+    # The production path rule is CONDITIONAL, which is easy to get wrong in both
+    # directions. Databricks recommends a SERVICE PRINCIPAL for production, set
+    # via run_as. Only if you do NOT use one does production additionally
+    # validate that artifact_path/file_path/root_path/state_path are not scoped
+    # to a specific user, AND that run_as and permissions are declared.
+    #
+    # Free Edition gives us no service principal, so we are in that second
+    # branch: the /Workspace/Shared root above is mandatory rather than a
+    # preference, and these two mappings are what the validator requires
+    # alongside it.
+    #
+    # DOCUMENTED GAP, NOT A SOLVED PROBLEM: run_as is a human identity. Real
+    # production runs as a service principal so deployments survive a person
+    # leaving and so job ownership is not tied to an individual. That upgrade is
+    # a platform-tier decision, not a config change.
+    run_as:
+      # SUBSTITUTION, NOT A LITERAL ADDRESS. A hardcoded email is personal data
+      # committed to the repository, and it makes the bundle non-portable: anyone
+      # else deploying it would run as someone who is not them.
+      #
+      # Found by the PII scanner, and eliminated at source rather than added to
+      # an allowlist. Suppressing a true finding is how a scanner becomes
+      # decoration.
+      user_name: ${workspace.current_user.userName}
+    # Explicitly acknowledges the /Workspace/Shared warning rather than silencing
+    # it. On a single-user workspace 'users' is one person, so this grants
+    # nothing new -- it states the intent the validator asked us to state.
+    permissions:
+      - level: CAN_MANAGE
+        group_name: users
+    variables:
+      # Empty: production mode does not prefix. Names deploy exactly as declared,
+      # so prod holds the plain ${var.catalog}.${var.schema}.
+      schema_prefix: ''
+
+# --- Variables -----------------------------------------------------------------
+# Declared once, overridden per target. This is what makes dev/prod promotion a
+# parameter change rather than a second copy of the configuration.
+variables:
+  catalog:
+    description: Unity Catalog catalog. NOT created by this bundle - prerequisite.
+    default: cscie103_catalog
+  schema:
+    description: >-
+      Bare schema name. The RESOURCE keeps this plain value. Never interpolate
+      schema_prefix into resources.schemas.*.name -- the CLI adds its own prefix
+      on top and you get dev_user_dev_user_<schema>.
+    default: assignment_01
+  reader_principal:
+    description: >-
+      Account group granted read access to this bundle's UC objects. Provisioned
+      by `mise run bootstrap:identity`, NOT by this bundle -- groups are not a
+      bundle resource type, so a bundle can only reference them.
+
+      MUST BE AN ACCOUNT GROUP. `users` and `admins` are WORKSPACE-LOCAL, and
+      workspace-local groups cannot hold privileges on UC securables at all. The
+      API reports that attempt as PRINCIPAL_DOES_NOT_EXIST, which reads like a
+      missing group but is a category error, and it is a documented common cause
+      of UC access failures.
+
+      NOT `account users` either: that exists and would work, but it means every
+      account user. UC best practice is least privilege via purpose-named groups.
+
+      NOT a user identity: owners already hold all privileges, so a self-grant is
+      redundant, and UC best practice is to avoid direct grants to users.
+    default: cscie103_readers
+  schema_prefix:
+    description: >-
+      What the CLI prepends in this target. Consumers -- job parameters, notebook
+      widgets -- build the effective name as ${var.schema_prefix}${var.schema} so
+      nothing hardcodes a name that development mode is going to rewrite.
+    default: ''
+  owner_email:
+    description: >-
+      Where job failure notifications go. NOT the deployer: on_failure was
+      the deploying user's address, which sends CI failures to the service
+      principal -- an identity with no inbox. A notification nobody receives is
+      worse than none, because it looks like coverage.
+
+      NO DEFAULT, DELIBERATELY. An address here would be personal data committed
+      to the repository, which the PII scanner correctly reports. Each target
+      supplies its own: a placeholder for fixture capture, the real address via
+      BUNDLE_VAR_owner_email when deploying.
+  environment_version:
+    description: >-
+      Databricks serverless environment version. AUTHORITATIVE: this value
+      determines the Python interpreter the server runs, and
+      contracts/environment-versions.json maps it to the local .python-version.
+      check:env-parity fails the build when the two disagree.
+    default: "5"

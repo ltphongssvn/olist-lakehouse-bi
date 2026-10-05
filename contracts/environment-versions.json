@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ltphongssvn/cscie103-data-engineering/contracts/environment-versions.json",
+  "title": "Databricks environment version -> local toolchain mapping",
+  "description": "Transcribed from the published environment version reference. Databricks exposes environment version contents as documentation, not as an API, so this file is the one hand-maintained link between the version declared in the bundle and the interpreter pinned locally. It exists to make that seam explicit and checkable rather than implicit and assumed. Verified 2026-09-02.",
+  "x-source": "https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/",
+  "x-verified-on": "2026-09-02",
+  "x-review-trigger": "A new environment version ships. Not a calendar date - versions are the event.",
+  "versions": {
+    "5": {
+      "python": "3.12.3",
+      "databricks_connect": "18",
+      "scala": "2.13.16",
+      "jdk": "17",
+      "os": "Ubuntu 24.04.3 LTS",
+      "released": "2026-02-25",
+      "end_of_support": "2029-02-25"
+    },
+    "4": {
+      "python": "3.12.3",
+      "databricks_connect": "17.3.2",
+      "scala": "2.13.16",
+      "jdk": "17",
+      "os": "Ubuntu 24.04.2 LTS",
+      "released": "2025-08-13",
+      "end_of_support": "2028-08-13"
+    },
+    "3": {
+      "python": "3.12.3",
+      "databricks_connect": "16.4.2",
+      "os": "Ubuntu 24.04.2 LTS",
+      "released": "2025-06-13",
+      "end_of_support": "2028-06-13"
+    },
+    "2": {
+      "python": "3.11.10",
+      "databricks_connect": "15.4.5",
+      "os": "Ubuntu 22.04.4 LTS",
+      "released": "2024-11-21",
+      "end_of_support": "2027-11-21"
+    },
+    "1": {
+      "python": "3.10.12",
+      "databricks_connect": "14.3.7",
+      "os": "Ubuntu 22.04.4 LTS",
+      "released": "2024-03-12",
+      "end_of_support": "2027-03-12"
+    }
+  }
+}

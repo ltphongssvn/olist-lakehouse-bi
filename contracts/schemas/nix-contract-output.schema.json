@@ -1,0 +1,337 @@
+{
+  "$defs": {
+    "Autonomy": {
+      "description": "How much an agent may do about a problem, without being told.\n\nALERT     report it; no command exists that fixes it unattended\nAPPROVE   a command exists, and a human authorises it before it runs\nAUTO      narrow, reversible, auditable -- safe to run unattended\n\nFAIL CLOSED: a problem with no explicit tier is ALERT. The guidance is\nexplicit that a system should \"fail closed when risk classification,\napproval validation, policy lookup, or audit logging fails\".",
+      "enum": [
+        "alert",
+        "approve",
+        "auto"
+      ],
+      "title": "Autonomy",
+      "type": "string"
+    },
+    "ContractProblem": {
+      "additionalProperties": false,
+      "description": "One thing wrong, in a form both an agent and a person can use.\n\nMOVED HERE FROM nix_contract, because a problem IS a code plus a message\nplus a Remediation -- it belongs beside the thing it carries. Leaving it in\nnix_contract would have forced an import cycle the moment nix_output needed\nto type its `problems` field.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "remediation": {
+          "$ref": "#/$defs/Remediation"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "remediation"
+      ],
+      "title": "ContractProblem",
+      "type": "object"
+    },
+    "ProbeRecord": {
+      "additionalProperties": false,
+      "description": "One command this contract ran, and what it did.\n\nWHY EVERY PROBE IS RECORDED, INCLUDING THE ONES THAT SUCCEEDED\nA contract that reports only conclusions cannot be audited. With this, a\nreader can see WHICH commands produced the verdict -- and a slow success\n(\"`nix eval` took 30s\") is a signal a boolean cannot carry.\n\nTRUNCATION IS EVIDENCE, NOT SILENCE\n`truncated` is recorded rather than left implicit, so a reader can tell a\nshort error from a cut one. A production runner names this requirement\nexactly: \"bounded stdout/stderr capture WITH TRUNCATION EVIDENCE\".\n\nARGV IS RECORDED, AND THAT IS SAFE HERE SPECIFICALLY\nArgument redaction matters wherever a command receives a secret. These are\nfixed `nix` invocations with store paths, run in an environment CONSTRUCTED\nrather than inherited -- nothing sensitive is passed in to echo back. That\nreasoning does not survive a command taking a credential as an argument, and\nredaction must come first if one is ever added.",
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Argv",
+          "type": "array"
+        },
+        "duration_ms": {
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "exit_code": {
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "name": {
+          "description": "What this probe was for, not what it ran",
+          "title": "Name",
+          "type": "string"
+        },
+        "stderr": {
+          "default": "",
+          "title": "Stderr",
+          "type": "string"
+        },
+        "stdout": {
+          "default": "",
+          "title": "Stdout",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "argv",
+        "exit_code",
+        "duration_ms"
+      ],
+      "title": "ProbeRecord",
+      "type": "object"
+    },
+    "Remediation": {
+      "additionalProperties": false,
+      "description": "What to do about a problem, in a form an agent can act on.\n\ncommand IS NOT RUN BY THIS PROGRAM. It is a proposal. The separation is the\npoint: this module decides, something else executes, and the something else\nis gated by `autonomy`.",
+      "properties": {
+        "autonomy": {
+          "$ref": "#/$defs/Autonomy",
+          "default": "alert"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The exact command that would fix it, or None if no single command does",
+          "title": "Command"
+        },
+        "description": {
+          "description": "What a person should understand",
+          "title": "Description",
+          "type": "string"
+        },
+        "privileged": {
+          "default": true,
+          "description": "Whether it requires elevation, which forbids AUTO",
+          "title": "Privileged",
+          "type": "boolean"
+        },
+        "reversible": {
+          "default": false,
+          "description": "Whether the command can be undone in place, which gates AUTO",
+          "title": "Reversible",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "title": "Remediation",
+      "type": "object"
+    },
+    "RunMetadata": {
+      "additionalProperties": false,
+      "description": "Who asked, when, and how long it took.",
+      "properties": {
+        "duration_ms": {
+          "description": "How long the observation took",
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "observed_at": {
+          "description": "RFC 3339, UTC",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "parent_span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "From TRACEPARENT",
+          "title": "Parent Span Id"
+        },
+        "run_id": {
+          "description": "Unique to this invocation",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "trace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "From an inherited TRACEPARENT, never invented",
+          "title": "Trace Id"
+        }
+      },
+      "required": [
+        "run_id",
+        "observed_at",
+        "duration_ms"
+      ],
+      "title": "RunMetadata",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "What the contract prints when it could observe the machine.\n\nFROZEN AND extra=\"forbid\": a field added here is a deliberate contract\nchange that fails the schema test until the committed schema is regenerated.",
+  "properties": {
+    "binary": {
+      "title": "Binary",
+      "type": "string"
+    },
+    "can_evaluate": {
+      "title": "Can Evaluate",
+      "type": "boolean"
+    },
+    "can_evaluate_a_flake": {
+      "title": "Can Evaluate A Flake",
+      "type": "boolean"
+    },
+    "distribution": {
+      "title": "Distribution",
+      "type": "string"
+    },
+    "from_store": {
+      "title": "From Store",
+      "type": "boolean"
+    },
+    "nix_present": {
+      "description": "Whether a nix binary was found; replaces `evaluable`",
+      "title": "Nix Present",
+      "type": "boolean"
+    },
+    "outcome": {
+      "description": "satisfied | policy_denied",
+      "title": "Outcome",
+      "type": "string"
+    },
+    "policy_version": {
+      "description": "Version of the RULES, not the shape",
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "probes": {
+      "items": {
+        "$ref": "#/$defs/ProbeRecord"
+      },
+      "title": "Probes",
+      "type": "array"
+    },
+    "problems": {
+      "items": {
+        "$ref": "#/$defs/ContractProblem"
+      },
+      "title": "Problems",
+      "type": "array"
+    },
+    "project_flake_checked": {
+      "default": false,
+      "description": "Whether THIS repository's flake was evaluated, distinct from passing",
+      "title": "Project Flake Checked",
+      "type": "boolean"
+    },
+    "receipt_valid": {
+      "title": "Receipt Valid",
+      "type": "boolean"
+    },
+    "request": {
+      "additionalProperties": true,
+      "description": "What this run was ASKED to do, distinct from what it found",
+      "title": "Request",
+      "type": "object"
+    },
+    "run": {
+      "$ref": "#/$defs/RunMetadata"
+    },
+    "satisfied": {
+      "title": "Satisfied",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "description": "Shape of this document",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_version": {
+      "title": "Semantic Version",
+      "type": "string"
+    },
+    "store_verify_status": {
+      "title": "Store Verify Status",
+      "type": "integer"
+    },
+    "system": {
+      "default": "",
+      "description": "Nix system double, e.g. aarch64-darwin -- the KIND of machine, not which one",
+      "title": "System",
+      "type": "string"
+    },
+    "uninstallable": {
+      "title": "Uninstallable",
+      "type": "boolean"
+    },
+    "uninstaller_present": {
+      "title": "Uninstaller Present",
+      "type": "boolean"
+    },
+    "untrusted_signature": {
+      "title": "Untrusted Signature",
+      "type": "boolean"
+    },
+    "verdicts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "pass or fail for every declared rule, so a passing rule is visible",
+      "title": "Verdicts",
+      "type": "object"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/ContractProblem"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "policy_version",
+    "outcome",
+    "run",
+    "satisfied",
+    "nix_present",
+    "binary",
+    "from_store",
+    "version",
+    "semantic_version",
+    "distribution",
+    "uninstallable",
+    "receipt_valid",
+    "uninstaller_present",
+    "can_evaluate",
+    "can_evaluate_a_flake",
+    "store_verify_status",
+    "untrusted_signature",
+    "probes",
+    "problems",
+    "warnings"
+  ],
+  "title": "ContractOutput",
+  "type": "object"
+}

@@ -1,0 +1,17 @@
+# context/plan.toml
+# This project's plan: intent only, never status (project-plan/v1). plan:status decides
+# each step's state from its evidence; plan:add and plan:amend are its only writers.
+contract = "project-plan/v1"
+
+threads = [
+  { id = "A", title = "Platform" },
+]
+
+[[steps]]
+id = "A.1"
+title = "The project is generated from the platform template"
+thread = "A"
+done_when = [
+  { kind = "task", name = "identity:set" },
+  { kind = "task", name = "plan:init" },
+]

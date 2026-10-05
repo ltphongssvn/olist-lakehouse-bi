@@ -1,0 +1,120 @@
+# resources/unity_catalog.yml
+# Unity Catalog objects this bundle OWNS.
+#
+# OWNERSHIP CUTS BOTH WAYS. A schema declared here is FULLY MANAGED, and
+# `bundle destroy` force-deletes managed schemas, warning that underlying data
+# may be lost. Declaring something you did not create is how you end up one
+# command away from destroying someone else's work.
+#
+# DELIBERATELY ABSENT:
+#   cscie103_catalog  - prerequisite; see the header of databricks.yml
+#   default, lab_00   - pre-existing schemas created outside this repo
+#
+# HOW THE BUNDLE DECIDES WHAT TO CREATE: resources are tracked BY ID IN STATE,
+# not by name -- a deploy attempts a create whenever tracked state lacks the
+# resource, and names are never used to correlate. A lost or mismatched state
+# file therefore makes the bundle treat existing objects as new and fail on
+# "already exists". Defences: a stable bundle name/target/workspace/deployer,
+# `bundle plan` before every deploy, and `bundle deployment bind` for anything
+# that pre-exists. Both objects below are new, so the first deploy CREATES.
+
+resources:
+  schemas:
+    assignment_01:
+      catalog_name: ${var.catalog}
+      # PLAIN NAME, NO PREFIX INTERPOLATION. development mode prepends its own
+      # sanitised prefix; writing ${var.schema_prefix}${var.schema} here would
+      # stack them into dev_user_dev_user_assignment_01. Consumers apply the
+      # prefix, the resource never does.
+      name: ${var.schema}
+      comment: >-
+        Assignment 1 (Spark API). Fully managed by the cscie103-data-engineering
+        bundle. Objects created here by hand are drift.
+      # ACCESS CONTROL AS CODE. An account group, provisioned by
+      # `mise run bootstrap:identity`. See var.reader_principal for why it cannot
+      # be `users`, `account users`, or an individual.
+      #
+      # USE_SCHEMA alone does not grant SELECT on the tables inside; the pair is
+      # the minimum for a reader, and UC inheritance carries it to current and
+      # future objects in the schema.
+      grants:
+        - principal: ${var.reader_principal}
+          privileges:
+            - USE_SCHEMA
+            - SELECT
+      # BEST-EFFORT GUARD, NOT A GUARANTEE. databricks/cli#4872 reports that
+      # lifecycle is omitted during deploy and destroy, and that the resource is
+      # wiped without the documented error. It is declared because it is correct
+      # when honored and free when not -- but the real protection is that
+      # `bundle destroy` is never run against this target, enforced by a gate
+      # rather than by this line.
+      lifecycle:
+        prevent_destroy: true
+
+    assignment_02:
+      catalog_name: ${var.catalog}
+      # Plain name: development mode prepends its own prefix, as for assignment_01.
+      name: assignment_02
+      comment: >-
+        Assignment 2 (TPC-H ETL). Fully managed by the cscie103-data-engineering
+        bundle. Objects created here by hand are drift.
+      grants:
+        - principal: ${var.reader_principal}
+          privileges:
+            - USE_SCHEMA
+            - SELECT
+      lifecycle:
+        prevent_destroy: true
+
+  volumes:
+    assignment_01_raw:
+      catalog_name: ${var.catalog}
+      # Reference, not a repeated literal: the deployment engine derives ordering
+      # from the dependency, and the dev-mode rename is picked up automatically.
+      schema_name: ${resources.schemas.assignment_01.name}
+      name: raw
+      # MANAGED, not EXTERNAL: storage stays in the catalog's managed location,
+      # so there is no external location or storage credential to provision --
+      # which matters because external_locations cannot be adopted by bundles
+      # either (databricks/cli#4842).
+      volume_type: MANAGED
+      grants:
+        - principal: ${var.reader_principal}
+          privileges:
+            - READ_VOLUME
+      # Same caveat as the schema above. Losing this volume means re-downloading
+      # the source data from Google Drive: the repo holds loader code, not
+      # parquet, by design.
+      lifecycle:
+        prevent_destroy: true
+      comment: >-
+        Landing zone for assignment source data: people10m, names-1880-2024, and
+        databricks-blog.json.
+
+    assignment_01_audit:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.assignment_01.name}
+      name: audit
+      volume_type: MANAGED
+      # READ-ONLY FOR READERS, WRITE BY OWNERSHIP. An audit archive that its
+      # consumers can modify is not an audit archive. Omitting grants entirely --
+      # which this resource did until a fixture test caught it -- leaves access
+      # to whatever ownership implies, which is not a stated posture.
+      grants:
+        - principal: ${var.reader_principal}
+          privileges:
+            - READ_VOLUME
+      lifecycle:
+        prevent_destroy: true
+      comment: >-
+        Immutable-by-convention archive of executed job runs. Job run results are
+        retained by Databricks for 60 days; anything needed beyond that must be
+        materialised. Written by the archive task, never by hand.
+
+        DOCUMENTED GAP, NOT A SOLVED PROBLEM: a SOC 2 audit vault wants S3 Object
+        Lock in a bucket the organisation owns, with a retention policy and
+        access logging. Free Edition has no external locations and no storage
+        credentials, so this is a MANAGED volume on Databricks-owned storage --
+        durable and versioned, but not immutable and not customer-controlled.
+        Upgrading means an external location plus a storage credential, at which
+        point only the volume declaration changes.

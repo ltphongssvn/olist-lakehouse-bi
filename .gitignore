@@ -1,0 +1,68 @@
+# ---- Data: never commit. Lives in Databricks Volumes; repo holds loader code only.
+#
+# THESE RULES FILTER BY FORMAT, WHICH IS NOT THE SAME AS FILTERING BY CONTENT.
+# An HTML export of an executed notebook contains cell OUTPUTS -- real names,
+# birth dates and salaries from display(people_df.limit(5)) -- and would pass
+# every rule below, because it is not a .parquet or a .csv. The policy was about
+# data, and the rules were about extensions.
+#
+# Exports are RELEASE ARTIFACTS, attached to a tagged GitHub Release and archived
+# to the audit volume. They are never committed: a snapshot in the tree cannot be
+# regenerated from the commit containing it, while a tag records the run that
+# produced it.
+assignments/**/exports/
+
+data/
+*.parquet
+*.avro
+*.orc
+*.csv
+*.tsv
+*.json.gz
+*.zip
+*.tar.gz
+!docs/**/*.csv
+
+# ---- Spark / Delta local artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+_delta_log/
+.checkpoint/
+*.crc
+_SUCCESS
+
+# ---- JetBrains IDE
+.idea/
+*.iml
+out/
+
+# ---- Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ---- Databricks CLI / auth  (credential leak surface)
+.databrickscfg
+.databricks/
+*.env
+.env.*
+
+# ---- Terminal artifacts
+#
+# A file literally named "...." keeps appearing. It is created by the IntelliJ
+# terminal's heredoc handling -- the `>....` continuation prompt -- not by
+# anything in this repo, and it has been committed once and staged twice since.
+#
+# Ignoring it stops `git add -A` from staging it. tests/test_no_data_in_repo.py
+# still fails if it is ever force-added, because .gitignore is defeated by
+# `git add -f` and by anything already tracked.
+....
+
+# ---- macOS
+.DS_Store
+
+# Recorded evidence: plan:status and other runs write here.
+.artifacts/
